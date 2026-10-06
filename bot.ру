@@ -598,7 +598,7 @@ async def build_morning_message(user_id: int) -> str:
 
 {tasks_info}
 
-Хорошего дня! 🚀"
+Хорошего дня! 🚀"""
 
 async def send_daily_digest(bot: Bot):
     """Рассылка сообщений утором ТОЛЬКО пользователям с активной подпиской."""
