@@ -582,16 +582,13 @@ async def build_morning_message(user_id: int) -> str:
     weather_info = await get_weather(city)
     horoscope_info = await get_horoscope(zodiac_key)
     
-    sched_info = f"📅 **Расписание**:
-{schedule}" if schedule else "📅 **Расписание**: Не добавлено. (/schedule)"
+    sched_info = f"📅 **Расписание**:\n{schedule}" if schedule else "📅 **Расписание**: Не добавлено. (/schedule)"
     
     tasks = get_user_tasks(user_id)
-    tasks_info = f"📋 **Дела**:
-" + "
-".join([f"• {t[1]}" for t in tasks]) if tasks else "📋 **Дела**: Нет запланированных дел."
+    tasks_info = f"📋 **Дела**:\n" + "\n".join([f"• {t[1]}" for t in tasks]) if tasks else "📋 **Дела**: Нет запланированных дел."
     
     today_date = datetime.now().strftime("%d.%m.%Y")
-    return f"☀️ **Утренний дайджест на {today_date}**
+    return f"""☀️ **Утренний дайджест на {today_date}**"""
 
 {weather_info}
 
