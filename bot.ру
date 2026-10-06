@@ -238,8 +238,8 @@ async def get_horoscope(zodiac_key: str) -> str:
                     data = await resp.json()
                     text = data.get("data", {}).get("horoscope_data", "")
                     if text:
-                        return f"🔮 **Гороскоп ({sign_ru}) на сегодня**:"
-{text}"
+                        return f"""🔮 **Гороскоп ({sign_ru}) на сегодня**:
+{text}"""
     except Exception as e:
         logger.error(f"Ошибка гороскопа: {e}")
         
