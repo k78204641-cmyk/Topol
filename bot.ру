@@ -480,9 +480,9 @@ async def cmd_schedule(message: Message):
     ])
     
     await message.answer(
-        f"📅 **Ваше расписание:**
+        f"""📅 **Ваше расписание:**
 
-{current_schedule}",
+{current_schedule}""",
         reply_markup=keyboard,
         disable_web_page_preview=True
     )
