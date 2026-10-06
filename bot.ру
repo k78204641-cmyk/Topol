@@ -588,7 +588,7 @@ async def build_morning_message(user_id: int) -> str:
     tasks_info = f"📋 **Дела**:\n" + "\n".join([f"• {t[1]}" for t in tasks]) if tasks else "📋 **Дела**: Нет запланированных дел."
     
     today_date = datetime.now().strftime("%d.%m.%Y")
-    return f"""☀️ **Утренний дайджест на {today_date}**"""
+    return f"""☀️ **Утренний дайджест на {today_date}**
 
 {weather_info}
 
