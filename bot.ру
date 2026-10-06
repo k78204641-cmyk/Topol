@@ -215,12 +215,12 @@ async def get_weather(city: str) -> str:
                 temp_min = daily.get("temperature_2m_min", [temp])[0]
 
                 return (
-                    f"🌡 **Погода в г. {city_name}**:
-"
-                    f"• Сейчас: **{temp}°C**
-"
-                    f"• Днем: от **{temp_min}°C** до **{temp_max}°C**
-"
+                    f"🌡 **Погода в г. {city_name}**:"
+
+                    f"• Сейчас: **{temp}°C**"
+
+                    f"• Днем: от **{temp_min}°C** до **{temp_max}°C**"
+
                     f"• Скорость ветра: **{wind} км/ч**"
                 )
     except Exception as e:
@@ -282,11 +282,11 @@ router = Router()
 async def send_paywall(message: Message):
     """Сообщение при истечении пробного периода или подписки."""
     await message.answer(
-        "🔒 **Ваш доступ ограничен**
+        "🔒 **Ваш доступ ограничен**"
 
-"
-        "Ваш бесплатный пробный период (1 день) завершился.
-"
+
+        "Ваш бесплатный пробный период (1 день) завершился."
+
         "Чтобы продолжить пользоваться ботом, получать утренние рассылки и управлять расписанием, оформите подписку за **150 рублей в месяц**.",
         reply_markup=get_pay_keyboard()
     )
@@ -302,39 +302,39 @@ async def cmd_start(message: Message, state: FSMContext):
         status_str = f"✅ Активна до **{exp_str}**" if is_active else "❌ **Истекла**"
         
         await message.answer(
-            f"👋 С возвращением!
+            f"👋 С возвращением!"
 
-"
-            f"Ваш профиль:
-"
-            f"• Знак зодиака: {ZODIAC_NAMES_RU.get(user[1], user[1])}
-"
-            f"• Город: {user[2]}
-"
-            f"• Подписка: {status_str}
 
-"
-            f"📌 **Команды бота**:
-"
-            f"• /today — Утренний дайджест
-"
-            f"• /schedule — Расписание
-"
-            f"• /tasks — Дела и задачи
-"
-            f"• /add_task — Добавить дело
-"
-            f"• /sub — Статус подписки и оплата
-"
+            f"Ваш профиль:"
+
+            f"• Знак зодиака: {ZODIAC_NAMES_RU.get(user[1], user[1])}"
+
+            f"• Город: {user[2]}"
+
+            f"• Подписка: {status_str}"
+
+
+            f"📌 **Команды бота**:"
+
+            f"• /today — Утренний дайджест"
+
+            f"• /schedule — Расписание"
+
+            f"• /tasks — Дела и задачи"
+
+            f"• /add_task — Добавить дело"
+
+            f"• /sub — Статус подписки и оплата"
+
             f"• /settings — Изменить город/знак"
         )
     else:
         await message.answer(
-            "Привет! 🖐 Я ваш персональный утренний помощник.
-"
-            "Вам предоставляется **1 день бесплатного пробного периода**.
+            "Привет! 🖐 Я ваш персональный утренний помощник."
 
-"
+            "Вам предоставляется **1 день бесплатного пробного периода**."
+
+
             "Выберите ваш знак зодиака:",
             reply_markup=get_zodiac_keyboard()
         )
@@ -346,9 +346,9 @@ async def process_zodiac_select(callback: CallbackQuery, state: FSMContext):
     await state.update_data(zodiac=zodiac_key)
     
     await callback.message.edit_text(
-        f"Выбран знак: **{ZODIAC_NAMES_RU.get(zodiac_key)}**.
+        f"Выбран знак: **{ZODIAC_NAMES_RU.get(zodiac_key)}**."
 
-"
+
         f"Введите город проживания (например: *Москва*, *Минск*, *Алматы*):"
     )
     await state.set_state(Registration.waiting_for_city)
@@ -367,17 +367,17 @@ async def process_city_input(message: Message, state: FSMContext):
     expires_at = datetime.fromisoformat(user[5]).strftime("%d.%m.%Y %H:%M")
     
     await message.answer(
-        f"🎉 **Регистрация завершена!**
+        f"🎉 **Регистрация завершена!**"
 
-"
-        f"🎁 Вам активирован **бесплатный период на 1 день** (до {expires_at}).
 
-"
-        f"• Знак зодиака: **{ZODIAC_NAMES_RU.get(zodiac_key)}**
-"
-        f"• Город: **{city}**
+        f"🎁 Вам активирован **бесплатный период на 1 день** (до {expires_at})."
 
-"
+
+        f"• Знак зодиака: **{ZODIAC_NAMES_RU.get(zodiac_key)}**"
+
+        f"• Город: **{city}**"
+
+
         f"Нажмите /today, чтобы получить утреннюю сводку прямо сейчас!"
     )
 
@@ -396,14 +396,14 @@ async def cmd_sub(message: Message):
     
     if is_active:
         await message.answer(
-            f"ℹ️ **Статус подписки**
+            f"ℹ️ **Статус подписки**"
 
-"
-            f"Статус: ✅ **Активна**
-"
-            f"Действует до: **{exp_str}**
 
-"
+            f"Статус: ✅ **Активна**"
+
+            f"Действует до: **{exp_str}**"
+
+
             f"Вы можете продлить подписку заранее ещё на 30 дней за **150 рублей**.",
             reply_markup=get_pay_keyboard()
         )
@@ -443,14 +443,14 @@ async def process_successful_payment(message: Message):
     exp_str = new_expires.strftime("%d.%m.%Y %H:%M")
     
     await message.answer(
-        f"🎉 **Оплата успешно прошла!**
+        f"🎉 **Оплата успешно прошла!**"
 
-"
-        f"Ваша подписка продлена на 30 дней.
-"
-        f"Действует до: **{exp_str}**.
 
-"
+        f"Ваша подписка продлена на 30 дней."
+
+        f"Действует до: **{exp_str}**."
+
+
         f"Спасибо, что пользуетесь нашим ботом! 🚀"
     )
 
@@ -530,13 +530,13 @@ async def cmd_tasks(message: Message):
         await message.answer("🎉 У вас нет активных дел! Напишите /add_task.")
         return
     
-    text = "📋 **Ваши актуальные дела:**
+    text = "📋 **Ваши актуальные дела:**"
 
-"
+
     keyboard_buttons = []
     for task_id, task_text in tasks:
-        text += f"• {task_text}
-"
+        text += f"• {task_text}"
+
         keyboard_buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {task_text[:20]}...", callback_data=f"del_task_{task_id}")])
     
     keyboard_buttons.append([InlineKeyboardButton(text="🗑 Очистить все дела", callback_data="clear_all_tasks")])
