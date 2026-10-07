@@ -2,6 +2,8 @@ import asyncio
 import logging
 import sqlite3
 import aiohttp
+import os
+from aiohttp import web
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -20,7 +22,7 @@ from aiogram.types import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==================== НАСТРОЙКИ / CONFIG ====================
-BOT_TOKEN = "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s"  # 👈 Вставьте токен вашего бота
+BOT_TOKEN = os.getenv"8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s"  # 👈 Вставьте токен вашего бота
 PAYMENT_PROVIDER_TOKEN = "ВАШ_ТОКЕН_ОПЛАТЫ_ИЗ_BOTFATHER"  # 👈 Токен ЮKassa, Сбербанка или тестовый (381763131:TEST:...)
 
 SUBSCRIPTION_PRICE = 10000  # 100 рублей (в копейках: 100 * 100)
@@ -633,7 +635,18 @@ async def send_daily_digest(bot: Bot):
 
 # ==================== ЗАПУСК ====================
 
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+
     init_db()
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
