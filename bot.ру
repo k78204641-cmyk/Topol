@@ -217,17 +217,17 @@ async def get_weather(city: str) -> str:
                 temp_min = daily.get("temperature_2m_min", [temp])[0]
 
                 return (
-                    f"🌡 **Погода в г. {city_name}**:"
+                    f"🌡 Погода в г. {city_name}:"
 
-                    f"• Сейчас: **{temp}°C**"
+                    f"• Сейчас: {temp}°C"
 
-                    f"• Днем: от **{temp_min}°C** до **{temp_max}°C**"
+                    f"• Днем: от {temp_min}°C до {temp_max}°C"
 
-                    f"• Скорость ветра: **{wind} км/ч**"
+                    f"• Скорость ветра: {wind} км/ч"
                 )
     except Exception as e:
         logger.error(f"Ошибка погоды: {e}")
-        return "🌡 **Погода**: Временно недоступна."
+        return "🌡 Погода: Временно недоступна."
 
 async def get_horoscope(zodiac_key: str) -> str:
     """Получение гороскопа на день."""
@@ -316,7 +316,7 @@ async def cmd_start(message: Message, state: FSMContext):
             f"• Подписка: {status_str}"
 
 
-            f"📌 **Команды бота**:"
+            f"📌 Команды бота:"
 
             f"• /today — Утренний дайджест"
 
@@ -395,12 +395,12 @@ async def cmd_sub(message: Message):
     
     if is_active:
         await message.answer(
-            f"ℹ️ **Статус подписки**"
+            f"ℹ️ Статус подписки"
 
 
-            f"Статус: ✅ **Активна**"
+            f"Статус: ✅ Активна"
 
-            f"Действует до: **{exp_str}**"
+            f"Действует до: {exp_str}"
 
 
             f"Вы можете продлить подписку заранее ещё на 30 дней за **150 рублей**.",
@@ -442,7 +442,7 @@ async def process_successful_payment(message: Message):
     exp_str = new_expires.strftime("%d.%m.%Y %H:%M")
     
     await message.answer(
-        f"🎉 **Оплата успешно прошла!**"
+        f"🎉 Оплата успешно прошла!"
 
 
         f"Ваша подписка продлена на 30 дней."
