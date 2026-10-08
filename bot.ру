@@ -22,7 +22,7 @@ from aiogram.types import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==================== НАСТРОЙКИ / CONFIG ====================
-BOT_TOKEN = "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s" # 👈 Вставьте токен вашего бота
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s") # 👈 Вставьте токен вашего бота
 PAYMENT_PROVIDER_TOKEN = "ВАШ_ТОКЕН_ОПЛАТЫ_ИЗ_BOTFATHER"  # 👈 Токен ЮKassa, Сбербанка или тестовый (381763131:TEST:...)
 
 SUBSCRIPTION_PRICE = 10000  # 100 рублей (в копейках: 100 * 100)
@@ -348,17 +348,14 @@ async def process_zodiac_select(callback: CallbackQuery, state: FSMContext):
     await state.update_data(zodiac=zodiac_key)
     
     await callback.message.edit_text(
-        f"Выбран знак: **{ZODIAC_NAMES_RU.get(zodiac_key)}**."
-
-
-        f"Введите город проживания (например: *Москва*, *Минск*, *Алматы*):"
+        f"Выбран знак: {ZODIAC_NAMES_RU.get(zodiac_key)}.\n\nВведите город проживания (например: *Москва*, *Минск*, *Алматы*):"
     )
     await state.set_state(Registration.waiting_for_city)
     await callback.answer()
 
 @router.message(Registration.waiting_for_city)
 async def process_city_input(message: Message, state: FSMContext):
-    city = message.text.strip()
+    city = message.text.replace("*","").strip()
     data = await state.get_data()
     zodiac_key = data.get("zodiac")
     
@@ -366,18 +363,18 @@ async def process_city_input(message: Message, state: FSMContext):
     await state.clear()
     
     user = get_user(message.from_user.id)
-    expires_at = datetime.fromisoformat(user[5]).strftime("%d.%m.%Y %H:%M")
+    expires_at = datetime.strptime(user[5],"%d.%m.%Y %H:%M")
     
     await message.answer(
-        f"🎉 **Регистрация завершена!**"
+        f"🎉 Регистрация завершена!"
 
 
-        f"🎁 Вам активирован **бесплатный период на 1 день** (до {expires_at})."
+        f"🎁 Вам активирован бесплатный период на 1 день (до {expires_at})."
 
 
-        f"• Знак зодиака: **{ZODIAC_NAMES_RU.get(zodiac_key)}**"
+        f"• Знак зодиака: {ZODIAC_NAMES_RU.get(zodiac_key)}"
 
-        f"• Город: **{city}**"
+        f"• Город: {city}"
 
 
         f"Нажмите /today, чтобы получить утреннюю сводку прямо сейчас!"
