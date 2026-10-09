@@ -22,7 +22,7 @@ from aiogram.types import (
 logging.basicConfig(level=logging.INFO)
 
 # Укажите ваш токен от @BotFather в кавычках ниже (или задайте BOT_TOKEN в Render Environment Variables):
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614972:ВАШ_ТОКЕН_ОТ_BOTFATHER")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s")
 
 # ==================== БАЗА ДАННЫХ (SQLITE) ====================
 DB_NAME = "bot_data.db"
