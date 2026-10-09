@@ -9,7 +9,7 @@ from html.parser import HTMLParser
 
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -27,10 +27,10 @@ from aiogram.types import (
 # ==================== НАСТРОЙКИ / CONFIG ====================
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота (автоматически подтягивается из Render или используется указанный):
+# Токен бота
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s")
 
-# Токен платежного провайдера ЮMoney (получается в @BotFather):
+# Токен платежного провайдера ЮMoney
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 
 # ==================== БАЗА ДАННЫХ (SQLITE) ====================
@@ -284,7 +284,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
-    await message.answer(f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный помощник. Выберите нужную функцию в меню ниже:", reply_markup=get_main_keyboard())
+    await message.answer(f"Привет, {message.from_user.first_name}! 👋\nВыберите нужную функцию в меню ниже:", reply_markup=get_main_keyboard())
 
 # --- Блок: Гороскоп ---
 @router.message(F.text == "🔮 Гороскоп")
@@ -305,7 +305,7 @@ async def ask_weather_city(message: Message, state: FSMContext):
     await state.set_state(WeatherStates.waiting_for_city)
     await message.answer("🌆 Напишите название города (например: Москва):")
 
-@router.message(WeatherStates.waiting_for_city)
+@router.message(StateFilter(WeatherStates.waiting_for_city))
 async def process_weather_city(message: Message, state: FSMContext):
     city = message.text.strip()
     await message.answer("🔍 Запрашиваю прогноз погоды...")
@@ -319,13 +319,13 @@ async def start_add_task(message: Message, state: FSMContext):
     await state.set_state(TaskStates.waiting_for_text)
     await message.answer("✏️ Напишите текст дела/задачи:")
 
-@router.message(TaskStates.waiting_for_text)
+@router.message(StateFilter(TaskStates.waiting_for_text))
 async def process_task_text(message: Message, state: FSMContext):
     await state.update_data(task_text=message.text.strip())
     await state.set_state(TaskStates.waiting_for_date)
     await message.answer("📅 Укажите дату (например: `сегодня`, `завтра` или `15.10.2026`):")
 
-@router.message(TaskStates.waiting_for_date)
+@router.message(StateFilter(TaskStates.waiting_for_date))
 async def process_task_date(message: Message, state: FSMContext):
     user_data = await state.get_data()
     task_text = user_data.get("task_text")
@@ -360,7 +360,7 @@ async def ask_schedule_url(message: Message, state: FSMContext):
     await state.set_state(ScheduleStates.waiting_for_url)
     await message.answer("🔗 Отправьте новую ссылку на ваше расписание (начиная с http:// или https://):")
 
-@router.message(ScheduleStates.waiting_for_url)
+@router.message(StateFilter(ScheduleStates.waiting_for_url))
 async def save_schedule_url(message: Message, state: FSMContext):
     url = message.text.strip()
     if not url.startswith("http"):
@@ -381,7 +381,7 @@ async def ask_schedule_date(message: Message, state: FSMContext):
     await state.set_state(ScheduleStates.waiting_for_date)
     await message.answer("📅 Введите дату или день недели (например: `сегодня`, `понедельник`):")
 
-@router.message(ScheduleStates.waiting_for_date)
+@router.message(StateFilter(ScheduleStates.waiting_for_date))
 async def process_schedule_date(message: Message, state: FSMContext):
     date_query = message.text.strip()
     user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
@@ -425,16 +425,13 @@ async def process_successful_payment(message: Message):
     db_execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (sub_until, user_id), commit=True)
     await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка активирована до **{sub_until}**.", reply_markup=get_main_keyboard())
 
-# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Отвечает на любые сообщения вне диалогов) ---
-@router.message()
-async def fallback_handler(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer(
-            "🤖 Я получил ваше сообщение, но не совсем понял команду.\n"
-            "Воспользуйтесь кнопками в меню ниже:",
-            reply_markup=get_main_keyboard()
-        )
+# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Отвечает только при пустом состоянии) ---
+@router.message(StateFilter(None))
+async def fallback_handler(message: Message):
+    await message.answer(
+        "🤖 Воспользуйтесь кнопками в меню ниже:",
+        reply_markup=get_main_keyboard()
+    )
 
 # ==================== ВЕБ-СЕРВЕР ДЛЯ RENDER ====================
 async def start_web_server():
@@ -456,7 +453,6 @@ async def main():
     await start_web_server()
     bot = Bot(token=BOT_TOKEN)
     try:
-        # Сбрасываем старые накопившиеся сообщения для предотвращения дублей
         await bot.delete_webhook(drop_pending_updates=True)
         logging.info("Бот успешно запущен!")
         await dp.start_polling(bot)
