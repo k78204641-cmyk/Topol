@@ -183,49 +183,20 @@ async def fetch_horoscope(sign_key: str) -> str:
 
 # ==================== ПОГОДА ====================
 async def fetch_weather(city: str) -> str:
-    url = f"https://wttr.in/{city}?format=j1&lang=ru"
+    # Используем текстовый формат wttr.in для абсолютной стабильности без сбоев парсинга JSON
+    url = f"https://wttr.in/{city}?format=3&lang=ru"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=8) as resp:
+            async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
-                    return f"❌ Сервис погоды недоступен или город «{city}» не найден."
-                
-                # Исправление ошибки с content_type. Если приходит текст (не JSON), aiohttp выбросит ошибку.
-                # Читаем текст, а потом пытаемся конвертировать в JSON.
-                text_data = await resp.text()
-                import json
-                try:
-                    data = json.loads(text_data)
-                except json.JSONDecodeError:
-                    return f"❌ Ошибка: город «{city}» не найден или сервис вернул некорректный ответ."
-
-                curr = data.get('current_condition', [{}])[0]
-                if not curr:
-                    return f"❌ Нет данных о погоде для «{city}»."
-                
-                temp = curr.get('temp_C', '?')
-                feels = curr.get('FeelsLikeC', '?')
-                
-                # Защита от отсутствия ключа lang_ru
-                desc = "Неизвестно"
-                if 'lang_ru' in curr and curr['lang_ru']:
-                    desc = curr['lang_ru'][0].get('value', 'Неизвестно')
-                elif 'weatherDesc' in curr and curr['weatherDesc']:
-                    desc = curr['weatherDesc'][0].get('value', 'Неизвестно')
-                    
-                humidity = curr.get('humidity', '?')
-                wind = curr.get('windspeedKmph', '?')
-
-                return (
-                    f"🌤 **Погода в г. {city.capitalize()}:**\n\n"
-                    f"• Температура: {temp}°C (ощущается как {feels}°C)\n"
-                    f"• На улице: {desc}\n"
-                    f"• Влажность: {humidity}%\n"
-                    f"• Ветер: {wind} км/ч"
-                )
+                    return f"❌ Город «{city}» не найден или сервис погоды недоступен."
+                text = await resp.text()
+                text = text.strip()
+                if not text or "Unknown location" in text or "Sorry" in text:
+                    return f"❌ Город «{city}» не найден."
+                return f"🌤 **Погода:**\n\n{text}"
     except Exception as e:
-        logging.error(f"Weather error: {e}")
-        return f"❌ Ошибка получения погоды. Попробуйте позже."
+        return f"❌ Ошибка получения погоды: {e}"
 
 # ==================== РАСПИСАНИЕ ИЗ ССЫЛКИ ====================
 async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
@@ -251,8 +222,6 @@ async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
             keywords.append(f"{dt.day:02d}.{dt.month:02d}")
             keywords.append(f"{dt.day} {months[dt.month-1]}")
             keywords.append(weekdays[dt.weekday()])
-            # Также ищем просто дату "ДД.ММ" (например, "15.10")
-            keywords.append(f"{dt.day:02d}.{dt.month:02d}")
         except Exception:
             pass
 
@@ -270,7 +239,6 @@ async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
 
             if capturing:
                 current_block.append(line)
-                # Берем следующие 15 строк как относящиеся к этому дню (чтобы захватить больше пар)
                 if len(current_block) >= 15:
                     matched_blocks.append("\n".join(current_block))
                     current_block = []
@@ -280,16 +248,15 @@ async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
             matched_blocks.append("\n".join(current_block))
 
         if matched_blocks:
-            res_text = "\n\n---\n\n".join(matched_blocks[:3]) # Выводим до 3 блоков
+            res_text = "\n\n---\n\n".join(matched_blocks[:3])
             if len(res_text) > 3500:
                 res_text = res_text[:3500] + "\n...(сокращено)"
             return f"📅 **Расписание на {raw_date_query}:**\n\n{res_text}"
         else:
-            return f"ℹ️ На странице не найдено расписание по запросу «{raw_date_query}».\nВозможно, занятий в этот день нет, или формат даты на сайте нестандартный."
+            return f"ℹ️ На странице не найдено расписание по запросу «{raw_date_query}»."
 
     except Exception as e:
-        logging.error(f"Schedule error: {e}")
-        return f"❌ Ошибка обработки расписания. Проверьте правильность ссылки."
+        return f"❌ Ошибка обработки расписания: {e}"
 
 # ==================== КЛАВИАТУРЫ ====================
 def get_main_keyboard():
@@ -305,50 +272,14 @@ def get_main_keyboard():
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 
-@router.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-    db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный помощник. Выберите нужную функцию в меню ниже:",
-        reply_markup=get_main_keyboard()
-    )
-
-# --- Блок: Гороскоп ---
-@router.message(F.text == "🔮 Гороскоп")
-async def ask_zodiac_sign(message: Message, state: FSMContext):
-    await state.clear()
-    await message.answer("✨ Выберите ваш знак зодиака:", reply_markup=get_zodiac_keyboard())
-
-@router.callback_query(F.data.startswith("horo_"))
-async def process_horoscope_callback(callback: CallbackQuery):
-    sign_key = callback.data.split("_")[1]
-    await callback.answer("Загружаю гороскоп...")
-    horo_text = await fetch_horoscope(sign_key)
-    await callback.message.answer(horo_text, reply_markup=get_main_keyboard())
-
-# --- Блок: Погода ---
-@router.message(F.text == "🌤 Погода")
-async def ask_weather_city(message: Message, state: FSMContext):
-    await state.set_state(WeatherStates.waiting_for_city)
-    await message.answer("🌆 Напишите название города (например: Москва):")
-
+# --- 1. ОБРАБОТЧИКИ СОСТОЯНИЙ (Должны быть выше меню и fallback) ---
 @router.message(StateFilter(WeatherStates.waiting_for_city))
 async def process_weather_city(message: Message, state: FSMContext):
     city = message.text.strip()
-    # Сбрасываем состояние СРАЗУ, чтобы избежать повторных входов
-    await state.clear() 
-    
+    await state.clear()
     await message.answer(f"🔍 Запрашиваю прогноз погоды для: {city}...")
     weather_res = await fetch_weather(city)
     await message.answer(weather_res, reply_markup=get_main_keyboard())
-
-# --- Блок: Дела ---
-@router.message(F.text == "📝 Записать дело")
-async def start_add_task(message: Message, state: FSMContext):
-    await state.set_state(TaskStates.waiting_for_text)
-    await message.answer("✏️ Напишите текст дела/задачи:")
 
 @router.message(StateFilter(TaskStates.waiting_for_text))
 async def process_task_text(message: Message, state: FSMContext):
@@ -362,8 +293,6 @@ async def process_task_date(message: Message, state: FSMContext):
     user_data = await state.get_data()
     task_text = user_data.get("task_text")
     formatted_date = parse_date_input(message.text.strip())
-    
-    # Сбрасываем состояние СРАЗУ
     await state.clear()
 
     db_execute(
@@ -373,7 +302,65 @@ async def process_task_date(message: Message, state: FSMContext):
     )
     await message.answer(f"✅ **Дело сохранено!**\n📌 {task_text}\n📆 {formatted_date}", reply_markup=get_main_keyboard())
 
-@router.message(F.text == "📋 Мои дела")
+@router.message(StateFilter(ScheduleStates.waiting_for_url))
+async def save_schedule_url(message: Message, state: FSMContext):
+    url = message.text.strip()
+    if not url.startswith("http"):
+        await message.answer("❌ Ссылка должна начинаться с http:// или https://. Попробуйте снова:")
+        return
+    await state.clear()
+    db_execute("UPDATE users SET schedule_url = ? WHERE user_id = ?", (url, message.from_user.id), commit=True)
+    await message.answer("✅ Ссылка на расписание успешно сохранена!", reply_markup=get_main_keyboard())
+
+@router.message(StateFilter(ScheduleStates.waiting_for_date))
+async def process_schedule_date(message: Message, state: FSMContext):
+    date_query = message.text.strip()
+    user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
+    await state.clear()
+    
+    if not user or not user[0]:
+        await message.answer("⚠️ Ссылка на расписание не найдена. Сохраните её через «🔗 Ссылка на расписание».", reply_markup=get_main_keyboard())
+        return
+    
+    await message.answer(f"🔄 Загружаю расписание на «{date_query}»...")
+    res = await fetch_schedule_from_link(user[0], date_query)
+    await message.answer(res, reply_markup=get_main_keyboard())
+
+
+# --- 2. ОБРАБОТЧИКИ КНОПОК И КОМАНД МЕНЮ (Только при StateFilter(None)) ---
+@router.message(CommandStart(), StateFilter(None))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    user_id = message.from_user.id
+    db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный помощник. Выберите нужную функцию в меню ниже:",
+        reply_markup=get_main_keyboard()
+    )
+
+@router.message(F.text == "🔮 Гороскоп", StateFilter(None))
+async def ask_zodiac_sign(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("✨ Выберите ваш знак зодиака:", reply_markup=get_zodiac_keyboard())
+
+@router.callback_query(F.data.startswith("horo_"))
+async def process_horoscope_callback(callback: CallbackQuery):
+    sign_key = callback.data.split("_")[1]
+    await callback.answer("Загружаю гороскоп...")
+    horo_text = await fetch_horoscope(sign_key)
+    await callback.message.answer(horo_text, reply_markup=get_main_keyboard())
+
+@router.message(F.text == "🌤 Погода", StateFilter(None))
+async def ask_weather_city(message: Message, state: FSMContext):
+    await state.set_state(WeatherStates.waiting_for_city)
+    await message.answer("🌆 Напишите название города (например: Москва):")
+
+@router.message(F.text == "📝 Записать дело", StateFilter(None))
+async def start_add_task(message: Message, state: FSMContext):
+    await state.set_state(TaskStates.waiting_for_text)
+    await message.answer("✏️ Напишите текст дела/задачи:")
+
+@router.message(F.text == "📋 Мои дела", StateFilter(None))
 async def show_my_tasks(message: Message, state: FSMContext):
     await state.clear()
     tasks = db_execute(
@@ -388,27 +375,12 @@ async def show_my_tasks(message: Message, state: FSMContext):
     text = "📋 **Ваши дела:**\n\n" + "\n".join([f"• **[{t[2]}]** {t[1]}" for t in tasks])
     await message.answer(text, reply_markup=get_main_keyboard())
 
-# --- Блок: Расписание ---
-@router.message(F.text == "🔗 Ссылка на расписание")
+@router.message(F.text == "🔗 Ссылка на расписание", StateFilter(None))
 async def ask_schedule_url(message: Message, state: FSMContext):
     await state.set_state(ScheduleStates.waiting_for_url)
-    await message.answer("🔗 Отправьте новую ссылку на ваше расписание (начиная с http:// или https://):")
+    await message.answer("🔗 Отправьте ссылку на ваше расписание (начиная с http:// или https://):")
 
-@router.message(StateFilter(ScheduleStates.waiting_for_url))
-async def save_schedule_url(message: Message, state: FSMContext):
-    url = message.text.strip()
-    
-    if not url.startswith("http"):
-        await message.answer("❌ Ссылка должна начинаться с http:// или https:// Попробуйте снова:")
-        return
-
-    # Сбрасываем состояние
-    await state.clear()
-
-    db_execute("UPDATE users SET schedule_url = ? WHERE user_id = ?", (url, message.from_user.id), commit=True)
-    await message.answer("✅ Ссылка сохранена!", reply_markup=get_main_keyboard())
-
-@router.message(F.text == "📅 Расписание на дату")
+@router.message(F.text == "📅 Расписание на дату", StateFilter(None))
 async def ask_schedule_date(message: Message, state: FSMContext):
     user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     if not user or not user[0]:
@@ -418,29 +390,16 @@ async def ask_schedule_date(message: Message, state: FSMContext):
     await state.set_state(ScheduleStates.waiting_for_date)
     await message.answer("📅 Введите дату или день недели (например: `сегодня`, `понедельник`, `15.10`):")
 
-@router.message(StateFilter(ScheduleStates.waiting_for_date))
-async def process_schedule_date(message: Message, state: FSMContext):
-    date_query = message.text.strip()
-    user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
-    
-    # Обязательно очищаем состояние
-    await state.clear()
-    
-    await message.answer(f"🔄 Загружаю расписание на «{date_query}»...")
-    res = await fetch_schedule_from_link(user[0], date_query)
-    await message.answer(res, reply_markup=get_main_keyboard())
-
-# --- Блок: Подписка / ЮMoney ---
-@router.message(F.text == "⭐️ Подписка")
+@router.message(F.text == "⭐️ Подписка", StateFilter(None))
 async def send_subscription_invoice(message: Message, state: FSMContext):
     await state.clear()
     user = db_execute("SELECT sub_until FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     if user and user[0]:
-        await message.answer(f"⭐️ **Ваша подписка активна до {user[0]}!**")
+        await message.answer(f"⭐️ **Ваша подписка активна до {user[0]}!**", reply_markup=get_main_keyboard())
         return
 
     if not PAYMENT_PROVIDER_TOKEN or "ВАШ_ТОКЕН" in PAYMENT_PROVIDER_TOKEN:
-        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nВы можете добавить его в переменные Render под именем `PAYMENT_PROVIDER_TOKEN`.")
+        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nВы можете добавить его в переменные Render под именем `PAYMENT_PROVIDER_TOKEN`.", reply_markup=get_main_keyboard())
         return
 
     prices = [LabeledPrice(label="Премиум подписка (1 месяц)", amount=19900)]
@@ -465,17 +424,12 @@ async def process_successful_payment(message: Message):
     db_execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (sub_until, user_id), commit=True)
     await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка активирована до **{sub_until}**.", reply_markup=get_main_keyboard())
 
-# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Для любых сообщений вне состояний) ---
+# --- 3. УНИВЕРСАЛЬНЫЙ FALLBACK (В самом низу) ---
 @router.message(StateFilter(None))
 async def fallback_handler(message: Message):
-    # Игнорируем технические сообщения (например, о вступлении в группу)
     if message.new_chat_members or message.left_chat_member:
         return
-        
-    await message.answer(
-        "🤖 Воспользуйтесь кнопками в меню ниже:",
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer("🤖 Воспользуйтесь кнопками в меню ниже:", reply_markup=get_main_keyboard())
 
 # ==================== ВЕБ-СЕРВЕР ДЛЯ RENDER ====================
 async def start_web_server():
@@ -497,15 +451,11 @@ async def main():
     await start_web_server()
     bot = Bot(token=BOT_TOKEN)
     try:
-        # САМОЕ ВАЖНОЕ для решения проблемы с дублями:
-        # Принудительно очищаем все старые сообщения перед запуском!
+        # Сброс вебхуков и старых апдейтов для предотвращения дублирования
         await bot.delete_webhook(drop_pending_updates=True)
         logging.info("Бот успешно запущен!")
         await dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
-    except Exception as e:
-        logging.error(f"Critical error during polling: {e}")
     finally:
-        # Гарантированное закрытие сессии
         await bot.session.close()
 
 if __name__ == "__main__":
