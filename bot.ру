@@ -287,7 +287,7 @@ async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
     await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\nВыберите нужную функцию в меню ниже:",
+        f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный помощник. Выберите нужную функцию в меню ниже:",
         reply_markup=get_main_keyboard()
     )
 
