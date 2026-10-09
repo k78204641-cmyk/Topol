@@ -27,10 +27,10 @@ from aiogram.types import (
 # ==================== НАСТРОЙКИ / CONFIG ====================
 logging.basicConfig(level=logging.INFO)
 
-# Токен бота
+# Ваш актуальный токен бота:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGD1i_KKdO8t4C31zQvsVzkq25ADuWkOlk")
 
-# Токен платежного провайдера ЮMoney
+# Токен платежного провайдера ЮMoney из @BotFather (если настроен):
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 
 # ==================== БАЗА ДАННЫХ (SQLITE) ====================
@@ -112,6 +112,8 @@ def parse_date_input(text: str) -> str:
         return today.strftime("%Y-%m-%d")
     elif text_lower in ["завтра", "tomorrow"]:
         return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+    elif text_lower in ["послезавтра"]:
+        return (today + timedelta(days=2)).strftime("%Y-%m-%d")
     
     try:
         parts = text_lower.split(".")
@@ -246,7 +248,7 @@ async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
 
             if capturing:
                 current_block.append(line)
-                if len(current_block) >= 10:
+                if len(current_block) >= 12:
                     matched_blocks.append("\n".join(current_block))
                     current_block = []
                     capturing = False
@@ -284,7 +286,10 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
-    await message.answer(f"Привет, {message.from_user.first_name}! 👋\nВыберите нужную функцию в меню ниже:", reply_markup=get_main_keyboard())
+    await message.answer(
+        f"Привет, {message.from_user.first_name}! 👋\nВыберите нужную функцию в меню ниже:",
+        reply_markup=get_main_keyboard()
+    )
 
 # --- Блок: Гороскоп ---
 @router.message(F.text == "🔮 Гороскоп")
@@ -400,7 +405,7 @@ async def send_subscription_invoice(message: Message, state: FSMContext):
         return
 
     if not PAYMENT_PROVIDER_TOKEN or "ВАШ_ТОКЕН" in PAYMENT_PROVIDER_TOKEN:
-        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nВы можете добавить его в Render переменные под именем `PAYMENT_PROVIDER_TOKEN`.")
+        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nВы можете добавить его в переменные Render под именем `PAYMENT_PROVIDER_TOKEN`.")
         return
 
     prices = [LabeledPrice(label="Премиум подписка (1 месяц)", amount=19900)]
@@ -425,7 +430,7 @@ async def process_successful_payment(message: Message):
     db_execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (sub_until, user_id), commit=True)
     await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка активирована до **{sub_until}**.", reply_markup=get_main_keyboard())
 
-# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Отвечает только при пустом состоянии) ---
+# --- УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (Для любых сообщений вне состояний) ---
 @router.message(StateFilter(None))
 async def fallback_handler(message: Message):
     await message.answer(
@@ -453,6 +458,7 @@ async def main():
     await start_web_server()
     bot = Bot(token=BOT_TOKEN)
     try:
+        # Очищаем вебхуки и сбрасываем пропущенные обновления
         await bot.delete_webhook(drop_pending_updates=True)
         logging.info("Бот успешно запущен!")
         await dp.start_polling(bot)
