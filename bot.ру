@@ -193,7 +193,7 @@ async def fetch_weather(city: str) -> str:
                 text = text.strip()
                 if not text or "Unknown location" in text or "Sorry" in text:
                     return f"❌ Город «{city}» не найден."
-                return f"🌤 **Погода:**\n\n{text}"
+                return f"🌤 {text}"
     except Exception as e:
         return f"❌ Ошибка получения погоды: {e}"
 
@@ -271,7 +271,7 @@ def get_main_keyboard():
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 
-# --- 1. ШАГИ ВВОДА (FSM СОВЕРШЕННО ИЗОЛИРОВАНЫ) ---
+# --- 1. ШАГИ ВВОДА (FSM) ---
 @router.message(StateFilter(WeatherStates.waiting_for_city))
 async def process_weather_city(message: Message, state: FSMContext):
     city = message.text.strip()
@@ -326,7 +326,7 @@ async def process_schedule_date(message: Message, state: FSMContext):
     await message.answer(res, reply_markup=get_main_keyboard())
 
 
-# --- 2. КНОПКИ МЕНЮ (С обязательным сбросом состояния через await state.clear()) ---
+# --- 2. КНОПКИ МЕНЮ (С Обязательным `await state.clear()`) ---
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -347,7 +347,6 @@ async def process_horoscope_callback(callback: CallbackQuery):
     sign_key = callback.data.split("_")[1]
     await callback.answer("Загружаю гороскоп...")
     horo_text = await fetch_horoscope(sign_key)
-    # Редактируем сообщение, чтобы исключить дублирование сообщений в чате
     try:
         await callback.message.edit_text(horo_text, reply_markup=None)
         await callback.message.answer("✨ Выберите следующее действие:", reply_markup=get_main_keyboard())
@@ -432,7 +431,7 @@ async def process_successful_payment(message: Message):
     db_execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (sub_until, user_id), commit=True)
     await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка активирована до **{sub_until}**.", reply_markup=get_main_keyboard())
 
-# --- 3. FALLBACK (Срабатывает только вне состояний) ---
+# --- 3. FALLBACK ---
 @router.message(StateFilter(None))
 async def fallback_handler(message: Message):
     if message.new_chat_members or message.left_chat_member:
