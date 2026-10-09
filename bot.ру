@@ -22,11 +22,11 @@ from aiogram.types import (
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ==================== НАСТРОЙКИ / CONFIG ====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s") # 👈 Вставьте токен вашего бота
-PAYMENT_PROVIDER_TOKEN = "ВАШ_ТОКЕН_ОПЛАТЫ_ИЗ_BOTFATHER"  # 👈 Токен ЮKassa, Сбербанка или тестовый (381763131:TEST:...)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "381763131:TEST:12345")
 
-SUBSCRIPTION_PRICE = 10000  # 100 рублей (в копейках: 100 * 100)
-TRIAL_DAYS = 1              # Пробный период в днях
+SUBSCRIPTION_PRICE = 15000  # 150 рублей (в копейках: 150 * 100)
+TRIAL_HOURS = 24            # Пробный период строго 24 часа
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,7 +39,6 @@ def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Таблица пользователей с полем даты окончания подписки
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -51,7 +50,6 @@ def init_db():
         )
     """)
     
-    # Таблица дел/напоминаний
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +59,6 @@ def init_db():
         )
     """)
     
-    # Проверка наличия колонки subscription_expires_at для старых баз
     cursor.execute("PRAGMA table_info(users)")
     columns = [col[1] for col in cursor.fetchall()]
     if "subscription_expires_at" not in columns:
@@ -82,13 +79,12 @@ def save_user_profile(user_id: int, zodiac: str, city: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Проверяем, существует ли уже пользователь
     cursor.execute("SELECT subscription_expires_at FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
     
     if not row or not row[0]:
-        # Если новый пользователь — выдаем бесплатный пробный период 1 день
-        trial_expire = datetime.now() + timedelta(days=TRIAL_DAYS)
+        # Ровно 24 часа триала
+        trial_expire = datetime.now() + timedelta(hours=TRIAL_HOURS)
         expires_str = trial_expire.isoformat()
     else:
         expires_str = row[0]
@@ -106,8 +102,11 @@ def is_subscription_active(user_id: int) -> bool:
     user = get_user(user_id)
     if not user or not user[5]:
         return False
-    expires_at = datetime.fromisoformat(user[5])
-    return datetime.now() < expires_at
+    try:
+        expires_at = datetime.fromisoformat(user[5])
+        return datetime.now() < expires_at
+    except (ValueError, TypeError):
+        return False
 
 def extend_subscription(user_id: int, days: int = 30):
     """Продление подписки на указанное количество дней."""
@@ -118,8 +117,11 @@ def extend_subscription(user_id: int, days: int = 30):
     
     now = datetime.now()
     if row and row[0]:
-        current_exp = datetime.fromisoformat(row[0])
-        start_from = max(now, current_exp)
+        try:
+            current_exp = datetime.fromisoformat(row[0])
+            start_from = max(now, current_exp)
+        except ValueError:
+            start_from = now
     else:
         start_from = now
         
@@ -173,7 +175,6 @@ def get_all_users():
     conn.close()
     return rows
 
-
 # ==================== ВНЕШНИЕ API (ПОГОДА И ГОРОСКОП) ====================
 
 ZODIAC_NAMES_RU = {
@@ -192,14 +193,17 @@ ZODIAC_NAMES_RU = {
 }
 
 async def get_weather(city: str) -> str:
-    """Получение прогноза погоды через Open-Meteo."""
+    """Получение прогноза погоды через Open-Meteo с быстрым таймаутом."""
+    timeout = aiohttp.ClientTimeout(total=5)
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=ru"
             async with session.get(geo_url) as resp:
+                if resp.status != 200:
+                    return f"🌡 Погода: Не удалось получить данные для города {city}."
                 geo_data = await resp.json()
                 if not geo_data.get("results"):
-                    return f"🌡 **Погода**: Не удалось найти город '{city}'."
+                    return f"🌡 Погода: Не удалось найти город {city}."
                 
                 lat = geo_data["results"][0]["latitude"]
                 lon = geo_data["results"][0]["longitude"]
@@ -207,6 +211,8 @@ async def get_weather(city: str) -> str:
 
             weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min&timezone=auto"
             async with session.get(weather_url) as resp:
+                if resp.status != 200:
+                    return f"🌡 Погода в г. {city_name}: Временно недоступна."
                 data = await resp.json()
                 current = data.get("current_weather", {})
                 temp = current.get("temperature", "N/A")
@@ -217,12 +223,9 @@ async def get_weather(city: str) -> str:
                 temp_min = daily.get("temperature_2m_min", [temp])[0]
 
                 return (
-                    f"🌡 Погода в г. {city_name}:"
-
-                    f"• Сейчас: {temp}°C"
-
-                    f"• Днем: от {temp_min}°C до {temp_max}°C"
-
+                    f"🌡 Погода в г. {city_name}:\n"
+                    f"• Сейчас: {temp}°C\n"
+                    f"• Днем: от {temp_min}°C до {temp_max}°C\n"
                     f"• Скорость ветра: {wind} км/ч"
                 )
     except Exception as e:
@@ -230,23 +233,22 @@ async def get_weather(city: str) -> str:
         return "🌡 Погода: Временно недоступна."
 
 async def get_horoscope(zodiac_key: str) -> str:
-    """Получение гороскопа на день."""
+    """Получение гороскопа на день с быстрым таймаутом."""
     sign_ru = ZODIAC_NAMES_RU.get(zodiac_key, zodiac_key.capitalize())
+    timeout = aiohttp.ClientTimeout(total=5)
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             url = f"https://horoscope-app-api.vercel.app/v1/get-horoscope/daily?sign={zodiac_key}&day=TODAY"
             async with session.get(url) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     text = data.get("data", {}).get("horoscope_data", "")
                     if text:
-                        return f"""🔮 **Гороскоп ({sign_ru}) на сегодня**:
-{text}"""
+                        return f"🔮 Гороскоп ({sign_ru}) на сегодня:\n{text}"
     except Exception as e:
         logger.error(f"Ошибка гороскопа: {e}")
         
-    return f"""🔮 **Гороскоп ({sign_ru})**: Сегодня отличный день для продуктивной работы и воплощения задуманного!"""
-
+    return f"🔮 Гороскоп ({sign_ru}): Сегодня отличный день для продуктивной работы и воплощения задуманного!"
 
 # ==================== FSM И КЛАВИАТУРЫ ====================
 
@@ -276,7 +278,6 @@ def get_pay_keyboard():
         [InlineKeyboardButton(text="💳 Продлить подписку (150 руб. / мес)", callback_data="buy_sub")]
     ])
 
-
 # ==================== ХЕНДЛЕРЫ / HANDLERS ====================
 
 router = Router()
@@ -284,12 +285,9 @@ router = Router()
 async def send_paywall(message: Message):
     """Сообщение при истечении пробного периода или подписки."""
     await message.answer(
-        "🔒 **Ваш доступ ограничен**"
-
-
-        "Ваш бесплатный пробный период (1 день) завершился."
-
-        "Чтобы продолжить пользоваться ботом, получать утренние рассылки и управлять расписанием, оформите подписку за **150 рублей в месяц**.",
+        "🔒 Ваш доступ ограничен\n\n"
+        "Ваш бесплатный пробный период (24 часа) завершился.\n\n"
+        "Чтобы продолжить пользоваться ботом, получать утренние рассылки и управлять расписанием, оформите подписку за 150 рублей в месяц.",
         reply_markup=get_pay_keyboard()
     )
 
@@ -297,46 +295,34 @@ async def send_paywall(message: Message):
 async def cmd_start(message: Message, state: FSMContext):
     user = get_user(message.from_user.id)
     if user and user[1] and user[2]:
-        expires_at = datetime.fromisoformat(user[5])
-        is_active = datetime.now() < expires_at
-        exp_str = expires_at.strftime("%d.%m.%Y %H:%M")
+        try:
+            expires_at = datetime.fromisoformat(user[5])
+            is_active = datetime.now() < expires_at
+            exp_str = expires_at.strftime("%d.%m.%Y %H:%M")
+        except (ValueError, TypeError):
+            is_active = False
+            exp_str = "Не известна"
         
-        status_str = f"✅ Активна до **{exp_str}**" if is_active else "❌ **Истекла**"
+        status_str = f"✅ Активна до {exp_str}" if is_active else "❌ Истекла"
         
         await message.answer(
-            f"👋 С возвращением!"
-
-
-            f"Ваш профиль:"
-
-            f"• Знак зодиака: {ZODIAC_NAMES_RU.get(user[1], user[1])}"
-
-            f"• Город: {user[2]}"
-
-            f"• Подписка: {status_str}"
-
-
-            f"📌 Команды бота:"
-
-            f"• /today — Утренний дайджест"
-
-            f"• /schedule — Расписание"
-
-            f"• /tasks — Дела и задачи"
-
-            f"• /add_task — Добавить дело"
-
-            f"• /sub — Статус подписки и оплата"
-
+            f"👋 С возвращением!\n\n"
+            f"Ваш профиль:\n"
+            f"• Знак зодиака: {ZODIAC_NAMES_RU.get(user[1], user[1])}\n"
+            f"• Город: {user[2]}\n"
+            f"• Подписка: {status_str}\n\n"
+            f"📌 Команды бота:\n"
+            f"• /today — Утренний дайджест\n"
+            f"• /schedule — Расписание\n"
+            f"• /tasks — Дела и задачи\n"
+            f"• /add_task — Добавить дело\n"
+            f"• /sub — Статус подписки и оплата\n"
             f"• /settings — Изменить город/знак"
         )
     else:
         await message.answer(
-            "Привет! 🖐 Я ваш персональный утренний помощник."
-
-            "Вам предоставляется **1 день бесплатного пробного периода**."
-
-
+            "Привет! 🖐 Я ваш персональный утренний помощник.\n\n"
+            "Вам предоставляется 24 часа бесплатного пробного периода.\n\n"
             "Выберите ваш знак зодиака:",
             reply_markup=get_zodiac_keyboard()
         )
@@ -348,35 +334,40 @@ async def process_zodiac_select(callback: CallbackQuery, state: FSMContext):
     await state.update_data(zodiac=zodiac_key)
     
     await callback.message.edit_text(
-        f"Выбран знак: {ZODIAC_NAMES_RU.get(zodiac_key)}.\n\nВведите город проживания (например: *Москва*, *Минск*, *Алматы*):"
+        f"Выбран знак: {ZODIAC_NAMES_RU.get(zodiac_key)}.\n\n"
+        f"Введите город проживания (например: Москва, Минск, Алматы):"
     )
     await state.set_state(Registration.waiting_for_city)
     await callback.answer()
 
 @router.message(Registration.waiting_for_city)
 async def process_city_input(message: Message, state: FSMContext):
-    city = message.text.replace("*","").strip()
+    city = message.text.replace("*", "").strip()
+    if not city:
+        await message.answer("Пожалуйста, введите название города текстом.")
+        return
+        
     data = await state.get_data()
-    zodiac_key = data.get("zodiac")
+    zodiac_key = data.get("zodiac", "aries")
     
     save_user_profile(message.from_user.id, zodiac_key, city)
     await state.clear()
     
     user = get_user(message.from_user.id)
-    expires_at = datetime.strptime(user[5],"%d.%m.%Y %H:%M")
+    if user and user[5]:
+        try:
+            expires_at = datetime.fromisoformat(user[5])
+            exp_str = expires_at.strftime("%d.%m.%Y %H:%M")
+        except (ValueError, TypeError):
+            exp_str = "завтра"
+    else:
+        exp_str = "завтра"
     
     await message.answer(
-        f"🎉 Регистрация завершена!"
-
-
-        f"🎁 Вам активирован бесплатный период на 1 день (до {expires_at})."
-
-
-        f"• Знак зодиака: {ZODIAC_NAMES_RU.get(zodiac_key)}"
-
-        f"• Город: {city}"
-
-
+        f"🎉 Регистрация завершена!\n\n"
+        f"🎁 Вам активирован бесплатный период на 24 часа (до {exp_str}).\n\n"
+        f"• Знак зодиака: {ZODIAC_NAMES_RU.get(zodiac_key)}\n"
+        f"• Город: {city}\n\n"
         f"Нажмите /today, чтобы получить утреннюю сводку прямо сейчас!"
     )
 
@@ -389,21 +380,20 @@ async def cmd_sub(message: Message):
         await message.answer("Сначала пройдите регистрацию с помощью /start.")
         return
         
-    expires_at = datetime.fromisoformat(user[5])
-    is_active = datetime.now() < expires_at
-    exp_str = expires_at.strftime("%d.%m.%Y в %H:%M")
+    try:
+        expires_at = datetime.fromisoformat(user[5])
+        is_active = datetime.now() < expires_at
+        exp_str = expires_at.strftime("%d.%m.%Y в %H:%M")
+    except (ValueError, TypeError):
+        is_active = False
+        exp_str = "Истекла"
     
     if is_active:
         await message.answer(
-            f"ℹ️ Статус подписки"
-
-
-            f"Статус: ✅ Активна"
-
-            f"Действует до: {exp_str}"
-
-
-            f"Вы можете продлить подписку заранее ещё на 30 дней за **150 рублей**.",
+            f"ℹ️ Статус подписки\n\n"
+            f"Статус: ✅ Активна\n"
+            f"Действует до: {exp_str}\n\n"
+            f"Вы можете продлить подписку заранее ещё на 30 дней за 150 рублей.",
             reply_markup=get_pay_keyboard()
         )
     else:
@@ -432,28 +422,21 @@ async def process_buy_sub(callback: CallbackQuery, bot: Bot):
 
 @router.pre_checkout_query()
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
-    """Подтверждение готовности принять платеж от Telegram."""
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message):
-    """Обработка успешной оплаты."""
     new_expires = extend_subscription(message.from_user.id, days=30)
     exp_str = new_expires.strftime("%d.%m.%Y %H:%M")
     
     await message.answer(
-        f"🎉 Оплата успешно прошла!"
-
-
-        f"Ваша подписка продлена на 30 дней."
-
-        f"Действует до: **{exp_str}**."
-
-
+        f"🎉 Оплата успешно прошла!\n\n"
+        f"Ваша подписка продлена на 30 дней.\n"
+        f"Действует до: {exp_str}.\n\n"
         f"Спасибо, что пользуетесь нашим ботом! 🚀"
     )
 
-# --- Функция-проверка доступа перед выполнением действий ---
+# --- Функции доступа ---
 
 @router.message(Command("today"))
 async def cmd_today(message: Message):
@@ -479,9 +462,7 @@ async def cmd_schedule(message: Message):
     ])
     
     await message.answer(
-        f"""📅 **Ваше расписание:**
-
-{current_schedule}""",
+        f"📅 Расписание:\n\n{current_schedule}",
         reply_markup=keyboard,
         disable_web_page_preview=True
     )
@@ -501,7 +482,7 @@ async def callback_edit_schedule(callback: CallbackQuery, state: FSMContext):
 async def process_schedule_input(message: Message, state: FSMContext):
     update_user_schedule(message.from_user.id, message.text.strip())
     await state.clear()
-    await message.answer("✅ **Расписание сохранено!**")
+    await message.answer("✅ Расписание сохранено!")
 
 @router.message(Command("add_task"))
 async def cmd_add_task(message: Message, state: FSMContext):
@@ -529,13 +510,10 @@ async def cmd_tasks(message: Message):
         await message.answer("🎉 У вас нет активных дел! Напишите /add_task.")
         return
     
-    text = "📋 **Ваши актуальные дела:**"
-
-
+    text = "📋 Ваши актуальные дела:\n\n"
     keyboard_buttons = []
     for task_id, task_text in tasks:
-        text += f"• {task_text}"
-
+        text += f"• {task_text}\n"
         keyboard_buttons.append([InlineKeyboardButton(text=f"❌ Удалить: {task_text[:20]}...", callback_data=f"del_task_{task_id}")])
     
     keyboard_buttons.append([InlineKeyboardButton(text="🗑 Очистить все дела", callback_data="clear_all_tasks")])
@@ -569,7 +547,6 @@ async def cmd_settings(message: Message, state: FSMContext):
     await message.answer("⚙️ Выберите знак зодиака заново:", reply_markup=get_zodiac_keyboard())
     await state.set_state(Registration.waiting_for_zodiac)
 
-
 # ==================== УТРЕННЯЯ СВОДКА И РАССЫЛКА ====================
 
 async def build_morning_message(user_id: int) -> str:
@@ -581,26 +558,15 @@ async def build_morning_message(user_id: int) -> str:
     weather_info = await get_weather(city)
     horoscope_info = await get_horoscope(zodiac_key)
     
-    sched_info = f"📅 **Расписание**:\n{schedule}" if schedule else "📅 **Расписание**: Не добавлено. (/schedule)"
+    sched_info = f"📅 Расписание:\n{schedule}" if schedule else "📅 Расписание: Не добавлено. (/schedule)"
     
     tasks = get_user_tasks(user_id)
-    tasks_info = f"📋 **Дела**:\n" + "\n".join([f"• {t[1]}" for t in tasks]) if tasks else "📋 **Дела**: Нет запланированных дел."
+    tasks_info = f"📋 Дела:\n" + "\n".join([f"• {t[1]}" for t in tasks]) if tasks else "📋 Дела: Нет запланированных дел."
     
     today_date = datetime.now().strftime("%d.%m.%Y")
-    return f"""☀️ **Утренний дайджест на {today_date}**
-
-{weather_info}
-
-{horoscope_info}
-
-{sched_info}
-
-{tasks_info}
-
-Хорошего дня! 🚀"""
+    return f"☀️ Утренний дайджест на {today_date}\n\n{weather_info}\n\n{horoscope_info}\n\n{sched_info}\n\n{tasks_info}\n\nХорошего дня! 🚀"
 
 async def send_daily_digest(bot: Bot):
-    """Рассылка сообщений утором ТОЛЬКО пользователям с активной подпиской."""
     users = get_all_users()
     logger.info("Запуск утренней рассылки...")
     
@@ -608,27 +574,24 @@ async def send_daily_digest(bot: Bot):
         user_id = user[0]
         expires_str = user[4]
         
-        # Проверяем подписку
-        if expires_str and datetime.now() < datetime.fromisoformat(expires_str):
+        if expires_str:
             try:
-                text = await build_morning_message(user_id)
-                await bot.send_message(user_id, text, disable_web_page_preview=True)
-                await asyncio.sleep(0.05)
-            except Exception as e:
-                logger.error(f"Не удалось отправить рассылку {user_id}: {e}")
-        else:
-            # Напоминание об истекшей подписке при рассылке
-            try:
-                await bot.send_message(
-                    user_id, 
-                    """⏰ **Время утреннего дайджеста!**
-
-Ваш бесплатный период/подписка истекли. Оформите подписку за 150 руб./мес, чтобы снова получать утренние сводки.""",
-                    reply_markup=get_pay_keyboard()
-                )
-            except Exception:
+                if datetime.now() < datetime.fromisoformat(expires_str):
+                    text = await build_morning_message(user_id)
+                    await bot.send_message(user_id, text, disable_web_page_preview=True)
+                    await asyncio.sleep(0.05)
+                    continue
+            except ValueError:
                 pass
 
+        try:
+            await bot.send_message(
+                user_id, 
+                "⏰ Время утреннего дайджеста!\n\nВаш бесплатный период/подписка истекли. Оформите подписку за 150 руб./мес, чтобы снова получать утренние сводки.",
+                reply_markup=get_pay_keyboard()
+            )
+        except Exception:
+            pass
 
 # ==================== ЗАПУСК ====================
 
@@ -652,6 +615,9 @@ async def main():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     scheduler.add_job(send_daily_digest, 'cron', hour=8, minute=0, args=[bot])
     scheduler.start()
+    
+    # Очищаем все зависшие/старые сообщения из очереди Telegram при старте
+    await bot.delete_webhook(drop_pending_updates=True)
     
     logger.info("Бот с системой подписок успешно запущен!")
     await dp.start_polling(bot)
