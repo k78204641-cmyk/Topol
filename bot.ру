@@ -28,7 +28,7 @@ from aiogram.types import (
 logging.basicConfig(level=logging.INFO)
 
 # Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGDgfDev6LwgdtXqxdd_CfDA2wgvDjGs8s")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGD1i_KKdO8t4C31zQvsVzkq25ADuWkOlk")
 
 # Токен платежного провайдера ЮMoney
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
