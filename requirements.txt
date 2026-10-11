@@ -1,2 +1,2 @@
-python-telegram-bot[job-queue]
-httpx
+aiogram>=3.0.0
+aiohttp
