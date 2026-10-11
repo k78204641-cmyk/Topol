@@ -14,7 +14,7 @@ from telegram.ext import (
 )
 
 # --- Настройки ---
-TOKEN = "8963614977:AAFhny9sEEwqXuUUpRHTl6nUv7r7nEjnMDI"          # Замените на токен вашего бота от @BotFather
+TOKEN = "8963614977:AAG8-Vs-fQlLXjmeLsWt6XDJ6oPirq0xY9o"          # Замените на токен вашего бота от @BotFather
 WEATHER_API_KEY = "YOUR_OPENWEATHER_API_KEY"  # Замените на API-ключ от openweathermap.org (опционально)
 
 # Состояния для ConversationHandler (FSM)
