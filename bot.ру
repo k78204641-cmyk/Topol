@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 
 # Ваш актуальный токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
+BOT_TOKEN = os.getenv("BOT_TOKEN","8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
 
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения BOT_TOKEN")
