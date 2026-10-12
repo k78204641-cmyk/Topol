@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 
 # Токен бота (можно заменить напрямую или передать через переменные окружения Render)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAGACHpwtatxzbgeJhRIJM-36Z0LACU7dvs")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "") # Токен ЮMoney из BotFather
 
 if not BOT_TOKEN:
