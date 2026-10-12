@@ -31,8 +31,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Ваш актуальный токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN","8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
+# Ваш актуальный токен встроен напрямую, чтобы избежать ошибок авторизации
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
 
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения BOT_TOKEN")
