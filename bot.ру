@@ -31,18 +31,18 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# Ваш актуальный токен встроен напрямую, чтобы избежать ошибок авторизации
+# Токен бота (можно заменить напрямую или передать через переменные окружения Render)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFZIa9FUp_4iOoqf5OBPfC6qTzsRh7KC84")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "") # Токен ЮMoney из BotFather
 
 if not BOT_TOKEN:
     raise ValueError("Не задана переменная окружения BOT_TOKEN")
-
-PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 
 # ==================== БАЗА ДАННЫХ (SQLITE) ====================
 DB_NAME = "bot_data.db"
 
 def init_db():
+    """Инициализация таблиц пользователей и задач"""
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -58,7 +58,9 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER,
                 task_text TEXT,
-                task_date TEXT
+                task_date TEXT,
+                remind_time TEXT,
+                is_notified INTEGER DEFAULT 0
             )
         """)
         conn.commit()
@@ -70,6 +72,7 @@ def init_db():
 init_db()
 
 def db_execute(query, params=(), fetchone=False, fetchall=False, commit=False):
+    """Безопасное выполнение SQL-запросов"""
     conn = sqlite3.connect(DB_NAME)
     try:
         cursor = conn.cursor()
@@ -92,12 +95,13 @@ class WeatherStates(StatesGroup):
 class TaskStates(StatesGroup):
     waiting_for_text = State()
     waiting_for_date = State()
+    waiting_for_time = State()
 
 class ScheduleStates(StatesGroup):
     waiting_for_url = State()
     waiting_for_date = State()
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ УТИЛИТЫ ====================
 class HTMLTextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -117,6 +121,7 @@ def clean_html_to_text(html_content: str) -> str:
     return parser.get_text()
 
 def parse_date_input(text: str) -> str:
+    """Интеллектуальный разбор дат (сегодня, завтра, ДД.ММ.ГГГГ)"""
     today = datetime.now()
     text_lower = text.strip().lower()
     
@@ -173,6 +178,7 @@ def get_zodiac_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 async def fetch_horoscope(sign_key: str) -> str:
+    """Получение актуального ежедневного гороскопа из открытого XML-источника"""
     url = "https://ignio.com/r/export/utf/xml/daily/com.xml"
     try:
         async with aiohttp.ClientSession() as session:
@@ -195,6 +201,7 @@ async def fetch_horoscope(sign_key: str) -> str:
 
 # ==================== ПОГОДА ====================
 async def fetch_weather(city: str) -> str:
+    """Получение фактической погоды через wttr.in"""
     url = f"https://wttr.in/{city}?format=3&lang=ru"
     try:
         async with aiohttp.ClientSession() as session:
@@ -211,15 +218,14 @@ async def fetch_weather(city: str) -> str:
 
 # ==================== РАСПИСАНИЕ ИЗ ССЫЛКИ ====================
 async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
+    """Парсинг расписания учебных занятий с пользовательской HTML-страницы"""
     parsed_date = parse_date_input(raw_date_query)
-    
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
                     return f"⚠️ Ошибка загрузки страницы (HTTP {resp.status}). Проверьте ссылку."
-                
                 html_body = await resp.text()
                 plain_text = clean_html_to_text(html_body)
 
@@ -265,7 +271,6 @@ async def fetch_schedule_from_link(url: str, raw_date_query: str) -> str:
             return f"📅 **Расписание на {raw_date_query}:**\n\n{res_text}"
         else:
             return f"ℹ️ На странице не найдено расписание по запросу «{raw_date_query}»."
-
     except Exception as e:
         return f"❌ Ошибка обработки расписания: {e}"
 
@@ -279,76 +284,51 @@ def get_main_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-# ==================== ХЕНДЛЕРЫ ====================
+# ==================== РОУТЕРЫ И ХЕНДЛЕРЫ ====================
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 
-# --- 1. ШАГИ ВВОДА (FSM) ---
-@router.message(StateFilter(WeatherStates.waiting_for_city))
-async def process_weather_city(message: Message, state: FSMContext):
-    city = message.text.strip()
-    await state.clear()
-    await message.answer(f"🔍 Запрашиваю прогноз погоды для: {city}...")
-    weather_res = await fetch_weather(city)
-    await message.answer(weather_res, reply_markup=get_main_keyboard())
-
-@router.message(StateFilter(TaskStates.waiting_for_text))
-async def process_task_text(message: Message, state: FSMContext):
-    task_text = message.text.strip()
-    await state.update_data(task_text=task_text)
-    await state.set_state(TaskStates.waiting_for_date)
-    await message.answer("📅 Укажите дату (например: `сегодня`, `завтра` или `15.10.2026`):")
-
-@router.message(StateFilter(TaskStates.waiting_for_date))
-async def process_task_date(message: Message, state: FSMContext):
-    user_data = await state.get_data()
-    task_text = user_data.get("task_text")
-    formatted_date = parse_date_input(message.text.strip())
-    await state.clear()
-
-    db_execute(
-        "INSERT INTO tasks (user_id, task_text, task_date) VALUES (?, ?, ?)",
-        (message.from_user.id, task_text, formatted_date),
-        commit=True
-    )
-    await message.answer(f"✅ **Дело сохранено!**\n📌 {task_text}\n📆 {formatted_date}", reply_markup=get_main_keyboard())
-
-@router.message(StateFilter(ScheduleStates.waiting_for_url))
-async def save_schedule_url(message: Message, state: FSMContext):
-    url = message.text.strip()
-    if not url.startswith("http"):
-        await message.answer("❌ Ссылка должна начинаться с http:// или https://. Попробуйте снова:")
-        return
-    await state.clear()
-    db_execute("UPDATE users SET schedule_url = ? WHERE user_id = ?", (url, message.from_user.id), commit=True)
-    await message.answer("✅ Ссылка на расписание успешно сохранена!", reply_markup=get_main_keyboard())
-
-@router.message(StateFilter(ScheduleStates.waiting_for_date))
-async def process_schedule_date(message: Message, state: FSMContext):
-    date_query = message.text.strip()
-    user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
-    await state.clear()
-    
-    if not user or not user[0]:
-        await message.answer("⚠️ Ссылка на расписание не найдена. Сохраните её через «🔗 Ссылка на расписание».", reply_markup=get_main_keyboard())
-        return
-    
-    await message.answer(f"🔄 Загружаю расписание на «{date_query}»...")
-    res = await fetch_schedule_from_link(user[0], date_query)
-    await message.answer(res, reply_markup=get_main_keyboard())
-
-
-# --- 2. КНОПКИ МЕНЮ ---
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
-    db_execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,), commit=True)
+    
+    # Проверяем, есть ли пользователь в базе
+    user = db_execute("SELECT sub_until FROM users WHERE user_id = ?", (user_id,), fetchone=True)
+    
+    if not user:
+        # Устанавливаем 2-дневный пробный период для новых пользователей
+        trial_end = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+        db_execute(
+            "INSERT INTO users (user_id, sub_until) VALUES (?, ?)",
+            (user_id, trial_end),
+            commit=True
+        )
+        sub_msg = f"🎁 Вам активирован **пробный период на 2 дня** (до {trial_end})!"
+    else:
+        sub_msg = f"⭐️ Ваша подписка активна до: **{user[0]}**"
+
     await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный помощник. Выберите нужную функцию в меню ниже:",
+        f"Привет, {message.from_user.first_name}! 👋\nЯ ваш универсальный бот-помощник.\n\n{sub_msg}\n\nВыберите нужную функцию в меню ниже:",
         reply_markup=get_main_keyboard()
     )
 
+# --- Управление погодой ---
+@router.message(F.text == "🌤 Погода")
+async def ask_weather_city(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(WeatherStates.waiting_for_city)
+    await message.answer("🌆 Напишите название города для прогноза погоды (например: `Москва`):")
+
+@router.message(StateFilter(WeatherStates.waiting_for_city))
+async def process_weather_city(message: Message, state: FSMContext):
+    city = message.text.strip()
+    await state.clear()
+    await message.answer(f"🔍 Запрашиваю фактическую погоду для: {city}...")
+    res = await fetch_weather(city)
+    await message.answer(res, reply_markup=get_main_keyboard())
+
+# --- Управление гороскопом ---
 @router.message(F.text == "🔮 Гороскоп")
 async def ask_zodiac_sign(message: Message, state: FSMContext):
     await state.clear()
@@ -365,50 +345,105 @@ async def process_horoscope_callback(callback: CallbackQuery):
     except Exception:
         await callback.message.answer(horo_text, reply_markup=get_main_keyboard())
 
-@router.message(F.text == "🌤 Погода")
-async def ask_weather_city(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(WeatherStates.waiting_for_city)
-    await message.answer("🌆 Напишите название города (например: Москва):")
-
+# --- Управление задачами и напоминаниями ---
 @router.message(F.text == "📝 Записать дело")
 async def start_add_task(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(TaskStates.waiting_for_text)
-    await message.answer("✏️ Напишите текст дела/задачи:")
+    await message.answer("✏️ Введите текст задачи или дела:")
+
+@router.message(StateFilter(TaskStates.waiting_for_text))
+async def process_task_text(message: Message, state: FSMContext):
+    await state.update_data(task_text=message.text.strip())
+    await state.set_state(TaskStates.waiting_for_date)
+    await message.answer("📅 Укажите дату (например: `сегодня`, `завтра` или `15.10.2026`):")
+
+@router.message(StateFilter(TaskStates.waiting_for_date))
+async def process_task_date(message: Message, state: FSMContext):
+    formatted_date = parse_date_input(message.text.strip())
+    await state.update_data(task_date=formatted_date)
+    await state.set_state(TaskStates.waiting_for_time)
+    await message.answer("⏰ Введите время напоминания в формате ЧЧ:ММ (например, `14:30`):")
+
+@router.message(StateFilter(TaskStates.waiting_for_time))
+async def process_task_time(message: Message, state: FSMContext):
+    time_str = message.text.strip()
+    try:
+        datetime.strptime(time_str, "%H:%M")
+    except ValueError:
+        await message.answer("❌ Неверный формат. Введите время в формате ЧЧ:ММ (например, 14:30):")
+        return
+
+    user_data = await state.get_data()
+    task_text = user_data.get("task_text")
+    task_date = user_data.get("task_date")
+    await state.clear()
+
+    db_execute(
+        "INSERT INTO tasks (user_id, task_text, task_date, remind_time, is_notified) VALUES (?, ?, ?, ?, 0)",
+        (message.from_user.id, task_text, task_date, time_str),
+        commit=True
+    )
+    await message.answer(f"✅ **Дело и напоминание успешно сохранены!**\n📌 {task_text}\n📆 Дата: {task_date}\n⏰ Время: {time_str}", reply_markup=get_main_keyboard())
 
 @router.message(F.text == "📋 Мои дела")
 async def show_my_tasks(message: Message, state: FSMContext):
     await state.clear()
     tasks = db_execute(
-        "SELECT id, task_text, task_date FROM tasks WHERE user_id = ? ORDER BY task_date ASC",
+        "SELECT id, task_text, task_date, remind_time FROM tasks WHERE user_id = ? ORDER BY task_date ASC",
         (message.from_user.id,),
         fetchall=True
     )
     if not tasks:
-        await message.answer("📭 Список дел пуст.", reply_markup=get_main_keyboard())
+        await message.answer("📭 У вас нет сохраненных дел.", reply_markup=get_main_keyboard())
         return
 
-    text = "📋 **Ваши дела:**\n\n" + "\n".join([f"• **[{t[2]}]** {t[1]}" for t in tasks])
+    text = "📋 **Ваши задачи:**\n\n" + "\n".join([f"• **[{t[2]} в {t[3]}]** {t[1]}" for t in tasks])
     await message.answer(text, reply_markup=get_main_keyboard())
 
+# --- Управление расписанием ---
 @router.message(F.text == "🔗 Ссылка на расписание")
 async def ask_schedule_url(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(ScheduleStates.waiting_for_url)
-    await message.answer("🔗 Отправьте ссылку на ваше расписание (начиная с http:// или https://):")
+    await message.answer("🔗 Отправьте прямую ссылку на ваше учебное расписание (начиная с http:// или https://):")
+
+@router.message(StateFilter(ScheduleStates.waiting_for_url))
+async def save_schedule_url(message: Message, state: FSMContext):
+    url = message.text.strip()
+    if not url.startswith("http"):
+        await message.answer("❌ Ссылка должна начинаться с http:// или https://. Попробуйте снова:")
+        return
+    await state.clear()
+    db_execute("UPDATE users SET schedule_url = ? WHERE user_id = ?", (url, message.from_user.id), commit=True)
+    await message.answer("✅ Ссылка на расписание успешно сохранена!", reply_markup=get_main_keyboard())
 
 @router.message(F.text == "📅 Расписание на дату")
 async def ask_schedule_date(message: Message, state: FSMContext):
     await state.clear()
     user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
     if not user or not user[0]:
-        await message.answer("⚠️ Сначала сохраните ссылку через «🔗 Ссылка на расписание».", reply_markup=get_main_keyboard())
+        await message.answer("⚠️ Сначала сохраните ссылку через кнопку «🔗 Ссылка на расписание».", reply_markup=get_main_keyboard())
         return
 
     await state.set_state(ScheduleStates.waiting_for_date)
     await message.answer("📅 Введите дату или день недели (например: `сегодня`, `понедельник`, `15.10`):")
 
+@router.message(StateFilter(ScheduleStates.waiting_for_date))
+async def process_schedule_date(message: Message, state: FSMContext):
+    date_query = message.text.strip()
+    user = db_execute("SELECT schedule_url FROM users WHERE user_id = ?", (message.from_user.id,), fetchone=True)
+    await state.clear()
+    
+    if not user or not user[0]:
+        await message.answer("⚠️ Ссылка не найдена.", reply_markup=get_main_keyboard())
+        return
+    
+    await message.answer(f"🔄 Загружаю расписание на «{date_query}»...")
+    res = await fetch_schedule_from_link(user[0], date_query)
+    await message.answer(res, reply_markup=get_main_keyboard())
+
+# --- Монетизация и оплата подписки (100 рублей) ---
 @router.message(F.text == "⭐️ Подписка")
 async def send_subscription_invoice(message: Message, state: FSMContext):
     await state.clear()
@@ -418,13 +453,14 @@ async def send_subscription_invoice(message: Message, state: FSMContext):
         return
 
     if not PAYMENT_PROVIDER_TOKEN or "ВАШ_ТОКЕН" in PAYMENT_PROVIDER_TOKEN:
-        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nВы можете добавить его в переменные Render под именем `PAYMENT_PROVIDER_TOKEN`.", reply_markup=get_main_keyboard())
+        await message.answer("⚠️ Платежный токен ЮMoney не настроен на сервере.\nДобавьте его в переменные Render под именем `PAYMENT_PROVIDER_TOKEN`.", reply_markup=get_main_keyboard())
         return
 
-    prices = [LabeledPrice(label="Премиум подписка (1 месяц)", amount=19900)]
+    # 100 рублей = 10000 копеек
+    prices = [LabeledPrice(label="Премиум подписка на 30 дней", amount=10000)]
     await message.answer_invoice(
-        title="Премиум подписка на 30 дней",
-        description="Полный доступ к функциям бота.",
+        title="Премиум подписка",
+        description="Полный доступ ко всем функциям бота на 30 дней.",
         provider_token=PAYMENT_PROVIDER_TOKEN,
         currency="RUB",
         prices=prices,
@@ -441,17 +477,57 @@ async def process_successful_payment(message: Message):
     user_id = message.from_user.id
     sub_until = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%d")
     db_execute("UPDATE users SET sub_until = ? WHERE user_id = ?", (sub_until, user_id), commit=True)
-    await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка активирована до **{sub_until}**.", reply_markup=get_main_keyboard())
+    await message.answer(f"🎉 **Оплата прошла успешно!**\nПодписка продлена до **{sub_until}**.", reply_markup=get_main_keyboard())
 
-# --- 3. FALLBACK ---
 @router.message(StateFilter(None))
 async def fallback_handler(message: Message):
     if message.new_chat_members or message.left_chat_member:
         return
     await message.answer("🤖 Воспользуйтесь кнопками в меню ниже:", reply_markup=get_main_keyboard())
 
-# ==================== ВЕБ-СЕРВЕР ДЛЯ RENDER ====================
+# ==================== ФОНОВЫЕ СЕРВИСНЫЕ ЗАДАЧИ (24/7) ====================
+async def reminder_loop(bot: Bot):
+    """Фоновые напоминания о задачах каждую минуту"""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            now_date = datetime.now().strftime("%Y-%m-%d")
+            now_time = datetime.now().strftime("%H:%M")
+            
+            tasks = db_execute(
+                "SELECT id, user_id, task_text FROM tasks WHERE task_date = ? AND remind_time = ? AND is_notified = 0",
+                (now_date, now_time),
+                fetchall=True
+            )
+            if tasks:
+                for task_id, user_id, task_text in tasks:
+                    try:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=f"⏰ **Напоминание о деле:**\n\n📌 {task_text}"
+                        )
+                        db_execute("UPDATE tasks SET is_notified = 1 WHERE id = ?", (task_id,), commit=True)
+                    except Exception as e:
+                        logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка в цикле напоминаний: {e}")
+
+async def self_ping():
+    """Само-пинг веб-сервера для предотвращения засыпания бота на Render Free Tier"""
+    app_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not app_url:
+        return
+    while True:
+        await asyncio.sleep(600)  # Каждые 10 минут
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{app_url}/health") as resp:
+                    logging.info(f"Self-ping status: {resp.status}")
+        except Exception as e:
+            logging.error(f"Self-ping error: {e}")
+
 async def start_web_server():
+    """Запуск легкого aiohttp сервера для удержания порта 10000 на Render"""
     app = web.Application()
     async def handle_ping(request):
         return web.Response(text="Bot OK")
@@ -464,17 +540,19 @@ async def start_web_server():
     await site.start()
     logging.info(f"Веб-сервер успешно запущен на порту {port}")
 
-# ==================== ЗАПУСК ====================
+# ==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 dp.include_router(router)
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
-        logging.info("Бот успешно запущен и готов к работе!")
+        logging.info("Бот запущен и готов к работе 24/7!")
         
         await asyncio.gather(
             start_web_server(),
+            self_ping(),
+            reminder_loop(bot),
             dp.start_polling(bot, allowed_updates=["message", "callback_query", "pre_checkout_query"])
         )
     except Exception as e:
@@ -487,4 +565,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Бот остановлен вручную.")
+        print("Бот остановлен пользователем.")
