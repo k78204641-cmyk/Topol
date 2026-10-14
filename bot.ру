@@ -30,7 +30,7 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-BOT_TOKEN = os.getenv("8963614977:AAGACHpwtatxzbgeJhRIJM-36Z0LACU7dvs")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")  # Токен ЮMoney из BotFather
 
 if not BOT_TOKEN:
