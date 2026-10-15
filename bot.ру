@@ -496,14 +496,12 @@ async def fallback_handler(message: Message):
 
 # ==================== ФОНОВЫЕ СЕРВИСНЫЕ ЗАДАЧИ (24/7) ====================
 async def reminder_loop(bot: Bot):
-    """Фоновые напоминания с учетом часового пояса пользователя"""
+    """Надежный фоновый цикл: проверяет задачи каждые 30 сек и отправляет, если время наступило или прошло"""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
         try:
-            # Получаем текущее время на сервере в UTC
             now_utc = datetime.utcnow()
             
-            # Загружаем задачи вместе со смещением часового пояса пользователя
             tasks = db_execute(
                 "SELECT t.id, t.user_id, t.task_text, t.task_date, t.remind_time, u.utc_offset "
                 "FROM tasks t JOIN users u ON t.user_id = u.user_id "
@@ -514,22 +512,21 @@ async def reminder_loop(bot: Bot):
             if tasks:
                 for task_id, user_id, task_text, task_date, remind_time, utc_offset in tasks:
                     offset = utc_offset if utc_offset is not None else 3
-                    
-                    # Вычисляем локальное время пользователя
                     user_now = now_utc + timedelta(hours=offset)
-                    user_now_date = user_now.strftime("%Y-%m-%d")
-                    user_now_time = user_now.strftime("%H:%M")
                     
-                    # Проверяем совпадение даты и времени
-                    if task_date == user_now_date and remind_time == user_now_time:
-                        try:
+                    try:
+                        # Соединяем дату и время задачи в единый объект datetime
+                        task_dt = datetime.strptime(f"{task_date} {remind_time}", "%Y-%m-%d %H:%M")
+                        
+                        # Если местное время пользователя наступило или прошло мимо задачи
+                        if user_now >= task_dt:
                             await bot.send_message(
                                 chat_id=user_id,
                                 text=f"⏰ **Напоминание о деле:**\n\n📌 {task_text}"
                             )
                             db_execute("UPDATE tasks SET is_notified = 1 WHERE id = ?", (task_id,), commit=True)
-                        except Exception as e:
-                            logging.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+                    except Exception as ex:
+                        logging.error(f"Ошибка обработки задачи {task_id}: {ex}")
         except Exception as e:
             logging.error(f"Ошибка в цикле напоминаний: {e}")
 
