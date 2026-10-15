@@ -496,30 +496,28 @@ async def fallback_handler(message: Message):
 
 # ==================== ФОНОВЫЕ СЕРВИСНЫЕ ЗАДАЧИ (24/7) ====================
 async def reminder_loop(bot: Bot):
-    """Надежный фоновый цикл: проверяет задачи каждые 30 сек и отправляет, если время наступило или прошло"""
+    """Фоновый цикл напоминаний по строго московскому времени (UTC+3)"""
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(30) # Проверяем каждые 30 секунд
         try:
+            # Получаем время UTC и прибавляем 3 часа (Московское время)
             now_utc = datetime.utcnow()
+            msk_time = now_utc + timedelta(hours=3)
             
+            # Загружаем все ненаправленные задачи
             tasks = db_execute(
-                "SELECT t.id, t.user_id, t.task_text, t.task_date, t.remind_time, u.utc_offset "
-                "FROM tasks t JOIN users u ON t.user_id = u.user_id "
-                "WHERE t.is_notified = 0",
+                "SELECT id, user_id, task_text, task_date, remind_time FROM tasks WHERE is_notified = 0",
                 fetchall=True
             )
             
             if tasks:
-                for task_id, user_id, task_text, task_date, remind_time, utc_offset in tasks:
-                    offset = utc_offset if utc_offset is not None else 3
-                    user_now = now_utc + timedelta(hours=offset)
-                    
+                for task_id, user_id, task_text, task_date, remind_time in tasks:
                     try:
                         # Соединяем дату и время задачи в единый объект datetime
                         task_dt = datetime.strptime(f"{task_date} {remind_time}", "%Y-%m-%d %H:%M")
                         
-                        # Если местное время пользователя наступило или прошло мимо задачи
-                        if user_now >= task_dt:
+                        # Если московское время наступило или уже прошло мимо задачи
+                        if msk_time >= task_dt:
                             await bot.send_message(
                                 chat_id=user_id,
                                 text=f"⏰ **Напоминание о деле:**\n\n📌 {task_text}"
