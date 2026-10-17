@@ -7,6 +7,7 @@ import pytz
 
 import aiohttp
 from aiohttp import web
+import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
@@ -22,34 +23,119 @@ import pytesseract
 from pdf2image import convert_from_bytes
 from pypdf import PdfReader
 
-import db
-
 # Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен из переменных окружения (или вставьте вручную)
+# Токен бота
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFqWYeA2IflZeTMN3olM86_JkvfMglCRek")
 MSK_TZ = pytz.timezone("Europe/Moscow")
+DB_PATH = "bot_database.db"
 
-# --- Состояния FSM ---
+# ==================== БАЗА ДАННЫХ ====================
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                registered_at TEXT NOT NULL,
+                is_subscribed INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_text TEXT NOT NULL,
+                remind_at TEXT NOT NULL,
+                is_sent INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                day_name TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
+async def get_or_create_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT registered_at, is_subscribed FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row
+            now_str = datetime.now().isoformat()
+            await db.execute("INSERT INTO users (user_id, registered_at, is_subscribed) VALUES (?, ?, 0)", (user_id, now_str))
+            await db.commit()
+            return (now_str, 0)
+
+async def check_user_access(user_id: int) -> bool:
+    reg_at_str, is_sub = await get_or_create_user(user_id)
+    if is_sub == 1:
+        return True
+    reg_date = datetime.fromisoformat(reg_at_str)
+    if datetime.now() - reg_date <= timedelta(days=2):
+        return True
+    return False
+
+async def set_user_subscription(user_id: int, status: int = 1):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET is_subscribed = ? WHERE user_id = ?", (status, user_id))
+        await db.commit()
+
+async def add_reminder(user_id: int, task_text: str, remind_at_iso: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO reminders (user_id, task_text, remind_at, is_sent) VALUES (?, ?, ?, 0)",
+            (user_id, task_text, remind_at_iso)
+        )
+        await db.commit()
+
+async def get_pending_reminders(now_iso: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, user_id, task_text FROM reminders WHERE remind_at <= ? AND is_sent = 0", (now_iso,)) as cursor:
+            return await cursor.fetchall()
+
+async def mark_reminder_sent(reminder_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE reminders SET is_sent = 1 WHERE id = ?", (reminder_id,))
+        await db.commit()
+
+async def save_schedule_day(user_id: int, day_name: str, content: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower()))
+        await db.execute("INSERT INTO schedule (user_id, day_name, content) VALUES (?, ?, ?)", (user_id, day_name.lower(), content))
+        await db.commit()
+
+async def get_schedule_day(user_id: int, day_name: str) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT content FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower())) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+# ==================== СОСТОЯНИЯ FSM ====================
+
 class FormStates(StatesGroup):
     waiting_for_city = State()
     waiting_for_task_text = State()
     waiting_for_task_datetime = State()
     waiting_for_schedule_text = State()
 
-# --- Middleware для проверки доступа/триала ---
+# ==================== MIDDLEWARE ДОСТУПА ====================
+
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         if user and not user.is_bot:
-            # Пропускаем команду /start и оплату
             message_text = getattr(event, "text", "") or ""
-            if message_text.startswith("/start") or message_text.startswith("/pay") or message_text == "💳 Оплатить подписку":
+            if message_text.startswith("/start") or message_text.startswith("/pay") or message_text == "💳 Подписка":
                 return await handler(event, data)
             
-            is_allowed = await db.check_user_access(user.id)
+            is_allowed = await check_user_access(user.id)
             if not is_allowed:
                 text = (
                     "🔒 **Ваш бесплатный пробный период (2 дня) истек.**\n\n"
@@ -57,7 +143,7 @@ class AccessMiddleware(BaseMiddleware):
                     "Стоимость: **100 руб.**"
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="💳 Оплатить 100 руб.", callback_query_handler="pay_sub")]
+                    [InlineKeyboardButton(text="💳 Оплатить 100 руб.", callback_data="pay_sub")]
                 ])
                 if isinstance(event, Message):
                     await event.answer(text, reply_markup=kb, parse_mode="Markdown")
@@ -68,7 +154,8 @@ class AccessMiddleware(BaseMiddleware):
 
         return await handler(event, data)
 
-# --- Главное меню ---
+# ==================== КЛАВИАТУРА ====================
+
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -80,14 +167,16 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-# --- Инициализация бота и роутера ---
+# ==================== ИНИЦИАЛИЗА ====================
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
-# --- Бесплатная погода (Open-Meteo) ---
+# ==================== ВСПОРМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
 async def fetch_weather(city_name: str) -> str:
     async with aiohttp.ClientSession() as session:
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=ru&format=json"
@@ -119,12 +208,12 @@ async def fetch_weather(city_name: str) -> str:
                 f"💨 Ветер: {wind} м/с"
             )
 
-# --- ХЕНДЛЕРЫ КОМАНД ---
+# ==================== ХЕНДЛЕРЫ ====================
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await db.get_or_create_user(message.from_user.id)
+    await get_or_create_user(message.from_user.id)
     await message.answer(
         "👋 **Добро пожаловать!**\n\n"
         "Вам предоставлен **бесплатный доступ на 2 дня**.\n"
@@ -155,7 +244,6 @@ async def horoscope_click(message: Message, state: FSMContext):
     buttons = [InlineKeyboardButton(text=s, callback_data=f"zodiac_{s}") for s in signs]
     kb = InlineKeyboardMarkup(inline_keyboard=[buttons[i:i+2] for i in range(0, len(buttons), 2)])
     await message.answer("✨ Выберите ваш знак зодиака:", reply_markup=kb)
-
 
 @router.callback_query(F.data.startswith("zodiac_"))
 async def horoscope_select(callback: CallbackQuery):
@@ -202,7 +290,7 @@ async def process_task_datetime(message: Message, state: FSMContext):
         dt_obj = datetime.strptime(dt_text, "%Y-%m-%d %H:%M")
         dt_msk = MSK_TZ.localize(dt_obj)
         data = await state.get_data()
-        await db.add_reminder(message.from_user.id, data["task_text"], dt_msk.isoformat())
+        await add_reminder(message.from_user.id, data["task_text"], dt_msk.isoformat())
         await state.clear()
         await message.answer(f"✅ Напоминание установлено на **{dt_text} (МСК)**!", parse_mode="Markdown")
     except ValueError:
@@ -213,9 +301,7 @@ async def process_task_datetime(message: Message, state: FSMContext):
 async def schedule_upload_click(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(FormStates.waiting_for_schedule_text)
-    await message.answer(
-        "📥 Пришлите расписание **текстом** или **PDF-файлом** (поддерживаются сканы)."
-    )
+    await message.answer("📥 Пришлите расписание **текстом** или **PDF-файлом** (поддерживаются сканы).")
 
 @router.message(FormStates.waiting_for_schedule_text, F.content_type.in_({"text", "document"}))
 async def process_schedule(message: Message, state: FSMContext):
@@ -223,11 +309,10 @@ async def process_schedule(message: Message, state: FSMContext):
     if message.text:
         text_content = message.text
     elif message.document and message.document.mime_type == "application/pdf":
-        await message.answer("⏳ Обработка PDF-файла (распознавание текста)...")
+        await message.answer("⏳ Обработка PDF-файла...")
         file_bytes = await bot.download(message.document)
         pdf_data = file_bytes.read()
         
-        # 1. Попытка обычного чтения
         try:
             reader = PdfReader(io.BytesIO(pdf_data))
             for page in reader.pages:
@@ -236,7 +321,6 @@ async def process_schedule(message: Message, state: FSMContext):
         except Exception as e:
             logger.error(f"PdfReader error: {e}")
 
-        # 2. Если текста нет -> OCR через pdf2image + pytesseract
         if not text_content.strip():
             try:
                 images = convert_from_bytes(pdf_data)
@@ -249,15 +333,14 @@ async def process_schedule(message: Message, state: FSMContext):
         await message.answer("❌ Не удалось извлечь текст из сообщения или PDF.")
         return
 
-    # Сохраняем общий текст расписания
-    await db.save_schedule_day(message.from_user.id, "общие", text_content.strip())
+    await save_schedule_day(message.from_user.id, "общие", text_content.strip())
     await state.clear()
     await message.answer("✅ Расписание успешно сохранено!", reply_markup=get_main_keyboard())
 
 @router.message(F.text == "📖 Посмотреть расписание")
 async def view_schedule_click(message: Message, state: FSMContext):
     await state.clear()
-    res = await db.get_schedule_day(message.from_user.id, "общие")
+    res = await get_schedule_day(message.from_user.id, "общие")
     if res:
         await message.answer(f"📖 **Ваше расписание:**\n\n{res}", parse_mode="Markdown")
     else:
@@ -267,30 +350,29 @@ async def view_schedule_click(message: Message, state: FSMContext):
 @router.message(F.text == "💳 Подписка")
 async def sub_status(message: Message, state: FSMContext):
     await state.clear()
-    is_sub = await db.check_user_access(message.from_user.id)
+    is_sub = await check_user_access(message.from_user.id)
     text = "✅ **Ваша подписка активна!**" if is_sub else "❌ **Подписка не найдена.**"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить 100 руб.", callback_data="pay_sub")]])
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data == "pay_sub")
 async def process_pay(callback: CallbackQuery):
-    # Имитация успешной оплаты
-    await db.set_user_subscription(callback.from_user.id, 1)
+    await set_user_subscription(callback.from_user.id, 1)
     await callback.message.answer("🎉 **Оплата прошла успешно!** Доступ восстановлен без ограничений.")
     await callback.answer()
 
-# --- Фоновый планировщик напоминаний ---
+# ==================== ФОНОВЫЕ ЗАДАЧИ И ВЕБ-СЕРВЕР ====================
+
 async def check_reminders_job():
     now_msk = datetime.now(MSK_TZ).isoformat()
-    reminders = await db.get_pending_reminders(now_msk)
+    reminders = await get_pending_reminders(now_msk)
     for r_id, u_id, task_text in reminders:
         try:
             await bot.send_message(u_id, f"⏰ **НАПОМИНАНИЕ:**\n\n{task_text}", parse_mode="Markdown")
-            await db.mark_reminder_sent(r_id)
+            await mark_reminder_sent(r_id)
         except Exception as e:
             logger.error(f"Ошибка отправки напоминания {r_id}: {e}")
 
-# --- Фейковый веб-сервер для бесплатного Render ---
 async def handle_dummy_web(request):
     return web.Response(text="Bot is running perfectly on Render!")
 
@@ -303,25 +385,20 @@ async def start_dummy_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-# --- Главный запуск ---
-async def main():
-    await db.init_db()
+# ==================== ЗАПУСК ====================
 
-    # Планировщик задач
+async def main():
+    await init_db()
+
     scheduler = AsyncIOScheduler(timezone=MSK_TZ)
     scheduler.add_job(check_reminders_job, "interval", seconds=30)
     scheduler.start()
 
-    # Подключаем роутер
     dp.include_router(router)
 
-    # Сбрасываем вебхуки для предотвращения конфликта
     await bot.delete_webhook(drop_pending_updates=True)
-
-    # Запускаем фейк веб-сервер для Render
     await start_dummy_server()
 
-    # Запускаем polling
     logger.info("Бот успешно запущен!")
     await dp.start_polling(bot)
 
