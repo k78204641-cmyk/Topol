@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = ("8963614977:AAGACHpwtatxzbgeJhRIJM-36Z0LACU7dvs")
+BOT_TOKEN = ("8963614977:AAFqWYeA2IflZeTMN3olM86_JkvfMglCRek")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 
