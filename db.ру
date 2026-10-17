@@ -1,0 +1,90 @@
+import aiosqlite
+from datetime import datetime, timedelta
+
+DB_PATH = "bot_database.db"
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Таблица пользователей
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                registered_at TEXT NOT NULL,
+                is_subscribed INTEGER DEFAULT 0
+            )
+        """)
+        # Таблица дел и напоминаний
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reminders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                task_text TEXT NOT NULL,
+                remind_at TEXT NOT NULL,
+                is_sent INTEGER DEFAULT 0
+            )
+        """)
+        # Таблица расписания
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                day_name TEXT NOT NULL,
+                content TEXT NOT NULL
+            )
+        """)
+        await db.commit()
+
+async def get_or_create_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT registered_at, is_subscribed FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row
+            now_str = datetime.now().isoformat()
+            await db.execute("INSERT INTO users (user_id, registered_at, is_subscribed) VALUES (?, ?, 0)", (user_id, now_str))
+            await db.commit()
+            return (now_str, 0)
+
+async def check_user_access(user_id: int) -> bool:
+    reg_at_str, is_sub = await get_or_create_user(user_id)
+    if is_sub == 1:
+        return True
+    reg_date = datetime.fromisoformat(reg_at_str)
+    if datetime.now() - reg_date <= timedelta(days=2):
+        return True
+    return False
+
+async def set_user_subscription(user_id: int, status: int = 1):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET is_subscribed = ? WHERE user_id = ?", (status, user_id))
+        await db.commit()
+
+async def add_reminder(user_id: int, task_text: str, remind_at_iso: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO reminders (user_id, task_text, remind_at, is_sent) VALUES (?, ?, ?, 0)",
+            (user_id, task_text, remind_at_iso)
+        )
+        await db.commit()
+
+async def get_pending_reminders(now_iso: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, user_id, task_text FROM reminders WHERE remind_at <= ? AND is_sent = 0", (now_iso,)) as cursor:
+            return await cursor.fetchall()
+
+async def mark_reminder_sent(reminder_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE reminders SET is_sent = 1 WHERE id = ?", (reminder_id,))
+        await db.commit()
+
+async def save_schedule_day(user_id: int, day_name: str, content: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower()))
+        await db.execute("INSERT INTO schedule (user_id, day_name, content) VALUES (?, ?, ?)", (user_id, day_name.lower(), content))
+        await db.commit()
+
+async def get_schedule_day(user_id: int, day_name: str) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT content FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower())) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
