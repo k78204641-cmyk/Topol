@@ -568,7 +568,6 @@ async def check_reminders(bot: Bot):
     
     for task in tasks:
         task_id, user_id, title, t_date, t_time, recurrence = task
-        # Отправляем напоминание
         try:
             await bot.send_message(
                 chat_id=user_id,
