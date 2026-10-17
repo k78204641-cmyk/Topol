@@ -19,8 +19,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart, Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-import pytesseract
-from pdf2image import convert_from_bytes
 from pypdf import PdfReader
 
 # Логирование
@@ -167,7 +165,7 @@ def get_main_keyboard():
         resize_keyboard=True
     )
 
-# ==================== ИНИЦИАЛИЗА ====================
+# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -175,7 +173,7 @@ router = Router()
 router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
-# ==================== ВСПОРМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 async def fetch_weather(city_name: str) -> str:
     async with aiohttp.ClientSession() as session:
@@ -301,7 +299,7 @@ async def process_task_datetime(message: Message, state: FSMContext):
 async def schedule_upload_click(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(FormStates.waiting_for_schedule_text)
-    await message.answer("📥 Пришлите расписание **текстом** или **PDF-файлом** (поддерживаются сканы).")
+    await message.answer("📥 Пришлите расписание **текстом** или **PDF-файлом**.")
 
 @router.message(FormStates.waiting_for_schedule_text, F.content_type.in_({"text", "document"}))
 async def process_schedule(message: Message, state: FSMContext):
@@ -309,7 +307,7 @@ async def process_schedule(message: Message, state: FSMContext):
     if message.text:
         text_content = message.text
     elif message.document and message.document.mime_type == "application/pdf":
-        await message.answer("⏳ Обработка PDF-файла...")
+        await message.answer("⏳ Чтение PDF-файла...")
         file_bytes = await bot.download(message.document)
         pdf_data = file_bytes.read()
         
@@ -321,16 +319,8 @@ async def process_schedule(message: Message, state: FSMContext):
         except Exception as e:
             logger.error(f"PdfReader error: {e}")
 
-        if not text_content.strip():
-            try:
-                images = convert_from_bytes(pdf_data)
-                for img in images:
-                    text_content += pytesseract.image_to_string(img, lang="rus+eng") + "\n"
-            except Exception as e:
-                logger.error(f"OCR error: {e}")
-
     if not text_content.strip():
-        await message.answer("❌ Не удалось извлечь текст из сообщения или PDF.")
+        await message.answer("❌ Не удалось извлечь текст из PDF. Убедитесь, что файл содержит текстовый слой.")
         return
 
     await save_schedule_day(message.from_user.id, "общие", text_content.strip())
