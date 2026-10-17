@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Токен бота
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAFqWYeA2IflZeTMN3olM86_JkvfMglCRek")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_PATH = "bot_database.db"
 
