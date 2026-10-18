@@ -3,6 +3,7 @@ import io
 import logging
 import asyncio
 from datetime import datetime, timedelta
+from urllib.parse import quote
 import pytz
 
 import aiohttp
@@ -25,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Переменные окружения и настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
-YOUMONEY_WALLET = os.getenv("YOUMONEY_WALLET", "41001XXXXXXXXXXXXX") # Кошелек ЮMoney в Environment на Render
-YOUMONEY_TOKEN = os.getenv("YOUMONEY_TOKEN", "")                     # Токен ЮMoney (при необходимости)
+YOUMONEY_WALLET = os.getenv("YOUMONEY_WALLET", "41001XXXXXXXXXXXXX") # Ваш кошелек ЮMoney
+YOUMONEY_TOKEN = os.getenv("YOUMONEY_TOKEN", "")                     # Токен API ЮMoney
 
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_PATH = "bot_database.db"
@@ -86,6 +87,11 @@ async def add_reminder(user_id: int, task_text: str, remind_at_iso: str):
             (user_id, task_text, remind_at_iso)
         )
         await db.commit()
+
+async def get_user_reminders(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT task_text, remind_at FROM reminders WHERE user_id = ? AND is_sent = 0 ORDER BY remind_at ASC", (user_id,)) as cursor:
+            return await cursor.fetchall()
 
 async def get_pending_reminders(now_iso: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -154,24 +160,19 @@ router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-from urllib.parse import quote
 
 async def fetch_weather(city_name: str) -> str:
-    # Заголовки, чтобы API Open-Meteo не блокировал запрос
     headers = {
-        "User-Agent": "TelegramBot/1.0 (https://t.me/Chickenmak_bot)"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TelegramBot/1.0"
     }
-    
-    # Безопасное кодирование названия города (для кириллицы)
     encoded_city = quote(city_name.strip())
-    
-    async with aiohttp.ClientSession(headers=headers) as session:
+    timeout = aiohttp.ClientTimeout(total=7)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=1&language=ru&format=json"
-        
         try:
-            async with session.get(geo_url, timeout=10) as resp:
+            async with session.get(geo_url) as resp:
                 if resp.status != 200:
-                    return f"❌ Ошибка геолокации (Код: {resp.status})."
+                    return f"❌ Сервер геолокации недоступен (Код: {resp.status})."
                 geo_data = await resp.json()
                 results = geo_data.get("results")
                 if not results:
@@ -182,9 +183,9 @@ async def fetch_weather(city_name: str) -> str:
                 country = loc.get("country", "")
 
             weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m"
-            async with session.get(weather_url, timeout=10) as resp:
+            async with session.get(weather_url) as resp:
                 if resp.status != 200:
-                    return "❌ Ошибка получения данных погоды."
+                    return "❌ Не удалось получить прогноз погоды."
                 w_data = await resp.json()
                 curr = w_data.get("current", {})
                 temp = curr.get("temperature_2m")
@@ -198,22 +199,11 @@ async def fetch_weather(city_name: str) -> str:
                     f"💧 Влажность: **{humidity}%**\n"
                     f"💨 Ветер: **{wind} м/с**"
                 )
+        except asyncio.TimeoutError:
+            return "⏳ Время ожидания ответа от погодного сервера истекло. Попробуйте еще раз."
         except Exception as e:
-            logger.error(f"Weather error: {e}")
-            return "❌ Не удалось получить погоду. Попробуйте еще раз позже."
-
-            w_data = await resp.json()
-            curr = w_data.get("current", {})
-            temp = curr.get("temperature_2m")
-            humidity = curr.get("relative_humidity_2m")
-            wind = curr.get("wind_speed_10m")
-
-            return (
-                f"🌍 **Погода в г. {name} ({country}):**\n\n"
-                f"🌡 Температура: {temp}°C\n"
-                f"💧 Влажность: {humidity}%\n"
-                f"💨 Ветер: {wind} м/с"
-            )
+            logger.error(f"Weather fetch error: {e}")
+            return "❌ Произошла ошибка при запросе погоды."
 
 def create_youmoney_link(user_id: int, amount: int) -> str:
     comment = f"sub_{user_id}"
@@ -272,14 +262,15 @@ async def cmd_start(message: Message, state: FSMContext):
 async def weather_click(message: Message, state: FSMContext):
     await state.clear()
     await state.set_state(FormStates.waiting_for_city)
-    await message.answer("🌍 Введите название города:")
+    await message.answer("🌍 Введите название города (например, *Москва* или *Казань*):", parse_mode="Markdown")
 
 @router.message(FormStates.waiting_for_city)
 async def weather_process(message: Message, state: FSMContext):
     city = message.text.strip()
+    await message.answer("⏳ Запрашиваю данные о погоде...")
     res = await fetch_weather(city)
     await state.clear()
-    await message.answer(res, parse_mode="Markdown")
+    await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 # --- Гороскоп ---
 @router.message(F.text == "🔮 Гороскоп")
@@ -337,9 +328,25 @@ async def process_task_datetime(message: Message, state: FSMContext):
         data = await state.get_data()
         await add_reminder(message.from_user.id, data["task_text"], dt_msk.isoformat())
         await state.clear()
-        await message.answer(f"✅ Напоминание установлено на **{dt_text} (МСК)**!", parse_mode="Markdown")
+        await message.answer(f"✅ Напоминание установлено на **{dt_text} (МСК)**!", parse_mode="Markdown", reply_markup=get_main_keyboard())
     except ValueError:
         await message.answer("❌ Неверный формат! Введите дату и время как `ГГГГ-ММ-ДД ЧЧ:ММ`:", parse_mode="Markdown")
+
+# --- Просмотр дел ---
+@router.message(F.text == "📅 Мои дела")
+async def view_tasks_click(message: Message, state: FSMContext):
+    await state.clear()
+    reminders = await get_user_reminders(message.from_user.id)
+    if not reminders:
+        await message.answer("📭 У вас нет активных запланированных дел.")
+        return
+    
+    text = "📅 **Ваши актуальные дела и напоминания:**\n\n"
+    for idx, (task, r_time) in enumerate(reminders, 1):
+        formatted_time = datetime.fromisoformat(r_time).strftime("%d.%m.%Y %H:%M")
+        text += f"{idx}. {task} — ⏰ *{formatted_time} (МСК)*\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 # --- Подписка и оплата через ЮMoney ---
 @router.message(F.text == "💳 Подписка")
@@ -374,8 +381,12 @@ async def process_check_pay(callback: CallbackQuery):
         await set_user_subscription(user_id, 1)
         await callback.message.answer("🎉 **Оплата подтверждена!** Подписка активирована.")
     else:
-        await set_user_subscription(user_id, 1)
-        await callback.message.answer("🎉 **Оплата принята!** Доступ к боту успешно продлен.")
+        await callback.message.answer(
+            "❌ **Оплата не найдена.**\n"
+            "Убедитесь, что вы завершили перевод, или подождите пару минут. "
+            "Если токен ЮMoney не настроен в системе, автоматическая проверка невозможна.",
+            parse_mode="Markdown"
+        )
     await callback.answer()
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ И САМОПИНГ ====================
