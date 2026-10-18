@@ -154,25 +154,54 @@ router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+from urllib.parse import quote
 
 async def fetch_weather(city_name: str) -> str:
-    async with aiohttp.ClientSession() as session:
-        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city_name}&count=1&language=ru&format=json"
-        async with session.get(geo_url) as resp:
-            if resp.status != 200:
-                return "❌ Ошибка геолокации."
-            geo_data = await resp.json()
-            results = geo_data.get("results")
-            if not results:
-                return f"❌ Город '{city_name}' не найден."
-            loc = results[0]
-            lat, lon, name = loc["latitude"], loc["longitude"], loc["name"]
-            country = loc.get("country", "")
+    # Заголовки, чтобы API Open-Meteo не блокировал запрос
+    headers = {
+        "User-Agent": "TelegramBot/1.0 (https://t.me/Chickenmak_bot)"
+    }
+    
+    # Безопасное кодирование названия города (для кириллицы)
+    encoded_city = quote(city_name.strip())
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={encoded_city}&count=1&language=ru&format=json"
+        
+        try:
+            async with session.get(geo_url, timeout=10) as resp:
+                if resp.status != 200:
+                    return f"❌ Ошибка геолокации (Код: {resp.status})."
+                geo_data = await resp.json()
+                results = geo_data.get("results")
+                if not results:
+                    return f"❌ Город «{city_name}» не найден. Проверьте правильность написания."
+                
+                loc = results[0]
+                lat, lon, name = loc["latitude"], loc["longitude"], loc.get("name", city_name)
+                country = loc.get("country", "")
 
-        weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m"
-        async with session.get(weather_url) as resp:
-            if resp.status != 200:
-                return "❌ Ошибка получения погоды."
+            weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m"
+            async with session.get(weather_url, timeout=10) as resp:
+                if resp.status != 200:
+                    return "❌ Ошибка получения данных погоды."
+                w_data = await resp.json()
+                curr = w_data.get("current", {})
+                temp = curr.get("temperature_2m")
+                humidity = curr.get("relative_humidity_2m")
+                wind = curr.get("wind_speed_10m")
+
+                country_str = f" ({country})" if country else ""
+                return (
+                    f"🌍 **Погода в г. {name}{country_str}:**\n\n"
+                    f"🌡 Температура: **{temp}°C**\n"
+                    f"💧 Влажность: **{humidity}%**\n"
+                    f"💨 Ветер: **{wind} м/с**"
+                )
+        except Exception as e:
+            logger.error(f"Weather error: {e}")
+            return "❌ Не удалось получить погоду. Попробуйте еще раз позже."
+
             w_data = await resp.json()
             curr = w_data.get("current", {})
             temp = curr.get("temperature_2m")
