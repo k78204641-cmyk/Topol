@@ -19,16 +19,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import CommandStart, Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from pypdf import PdfReader
-
 # Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен бота
+# Переменные окружения и настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
+YOUMONEY_WALLET = os.getenv("YOUMONEY_WALLET", "41001XXXXXXXXXXXXX") # Кошелек ЮMoney в Environment на Render
+YOUMONEY_TOKEN = os.getenv("YOUMONEY_TOKEN", "")                     # Токен ЮMoney (при необходимости)
+
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_PATH = "bot_database.db"
+SUBSCRIPTION_PRICE = 50  # Стоимость подписки в рублях
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -48,14 +50,6 @@ async def init_db():
                 task_text TEXT NOT NULL,
                 remind_at TEXT NOT NULL,
                 is_sent INTEGER DEFAULT 0
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS schedule (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                day_name TEXT NOT NULL,
-                content TEXT NOT NULL
             )
         """)
         await db.commit()
@@ -103,25 +97,12 @@ async def mark_reminder_sent(reminder_id: int):
         await db.execute("UPDATE reminders SET is_sent = 1 WHERE id = ?", (reminder_id,))
         await db.commit()
 
-async def save_schedule_day(user_id: int, day_name: str, content: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower()))
-        await db.execute("INSERT INTO schedule (user_id, day_name, content) VALUES (?, ?, ?)", (user_id, day_name.lower(), content))
-        await db.commit()
-
-async def get_schedule_day(user_id: int, day_name: str) -> str:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT content FROM schedule WHERE user_id = ? AND day_name = ?", (user_id, day_name.lower())) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
-
 # ==================== СОСТОЯНИЯ FSM ====================
 
 class FormStates(StatesGroup):
     waiting_for_city = State()
     waiting_for_task_text = State()
     waiting_for_task_datetime = State()
-    waiting_for_schedule_text = State()
 
 # ==================== MIDDLEWARE ДОСТУПА ====================
 
@@ -137,11 +118,11 @@ class AccessMiddleware(BaseMiddleware):
             if not is_allowed:
                 text = (
                     "🔒 **Ваш бесплатный пробный период (2 дня) истек.**\n\n"
-                    "Для продолжения использования всех функций бота необходимо оформить подписку.\n"
-                    "Стоимость: **100 руб.**"
+                    f"Для продолжения использования всех функций бота необходимо оформить подписку.\n"
+                    f"Стоимость: **{SUBSCRIPTION_PRICE} руб.**"
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="💳 Оплатить 100 руб.", callback_data="pay_sub")]
+                    [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб.", callback_data="pay_sub")]
                 ])
                 if isinstance(event, Message):
                     await event.answer(text, reply_markup=kb, parse_mode="Markdown")
@@ -159,7 +140,6 @@ def get_main_keyboard():
         keyboard=[
             [KeyboardButton(text="☀️ Погода"), KeyboardButton(text="🔮 Гороскоп")],
             [KeyboardButton(text="⏰ Добавить дело"), KeyboardButton(text="📅 Мои дела")],
-            [KeyboardButton(text="📚 Загрузить расписание"), KeyboardButton(text="📖 Посмотреть расписание")],
             [KeyboardButton(text="💳 Подписка")]
         ],
         resize_keyboard=True
@@ -205,6 +185,44 @@ async def fetch_weather(city_name: str) -> str:
                 f"💧 Влажность: {humidity}%\n"
                 f"💨 Ветер: {wind} м/с"
             )
+
+def create_youmoney_link(user_id: int, amount: int) -> str:
+    comment = f"sub_{user_id}"
+    return (
+        f"https://yoomoney.ru/quickpay/confirm.xml?"
+        f"receiver={YOUMONEY_WALLET}&"
+        f"quickpay-form=shop&"
+        f"targets=Подписка+на+бота&"
+        f"paymentType=SB&"
+        f"sum={amount}&"
+        f"label={comment}"
+    )
+
+async def check_youmoney_payment(user_id: int) -> bool:
+    if not YOUMONEY_TOKEN:
+        return False
+    url = "https://yoomoney.ru/api/operation-history"
+    headers = {
+        "Authorization": f"Bearer {YOUMONEY_TOKEN}",
+        "Content-Type": "application/x-www-form-encoding"
+    }
+    payload = {
+        "type": "deprecation",
+        "label": f"sub_{user_id}",
+        "records": 5
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, data=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    operations = data.get("operations", [])
+                    for op in operations:
+                        if op.get("status") == "success" and float(op.get("amount", 0)) >= SUBSCRIPTION_PRICE:
+                            return True
+    except Exception as e:
+        logger.error(f"ЮMoney API Error: {e}")
+    return False
 
 # ==================== ХЕНДЛЕРЫ ====================
 
@@ -294,64 +312,44 @@ async def process_task_datetime(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Неверный формат! Введите дату и время как `ГГГГ-ММ-ДД ЧЧ:ММ`:", parse_mode="Markdown")
 
-# --- Загрузка и просмотр расписания ---
-@router.message(F.text == "📚 Загрузить расписание")
-async def schedule_upload_click(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(FormStates.waiting_for_schedule_text)
-    await message.answer("📥 Пришлите расписание **текстом** или **PDF-файлом**.")
-
-@router.message(FormStates.waiting_for_schedule_text, F.content_type.in_({"text", "document"}))
-async def process_schedule(message: Message, state: FSMContext):
-    text_content = ""
-    if message.text:
-        text_content = message.text
-    elif message.document and message.document.mime_type == "application/pdf":
-        await message.answer("⏳ Чтение PDF-файла...")
-        file_bytes = await bot.download(message.document)
-        pdf_data = file_bytes.read()
-        
-        try:
-            reader = PdfReader(io.BytesIO(pdf_data))
-            for page in reader.pages:
-                t = page.extract_text()
-                if t: text_content += t + "\n"
-        except Exception as e:
-            logger.error(f"PdfReader error: {e}")
-
-    if not text_content.strip():
-        await message.answer("❌ Не удалось извлечь текст из PDF. Убедитесь, что файл содержит текстовый слой.")
-        return
-
-    await save_schedule_day(message.from_user.id, "общие", text_content.strip())
-    await state.clear()
-    await message.answer("✅ Расписание успешно сохранено!", reply_markup=get_main_keyboard())
-
-@router.message(F.text == "📖 Посмотреть расписание")
-async def view_schedule_click(message: Message, state: FSMContext):
-    await state.clear()
-    res = await get_schedule_day(message.from_user.id, "общие")
-    if res:
-        await message.answer(f"📖 **Ваше расписание:**\n\n{res}", parse_mode="Markdown")
-    else:
-        await message.answer("📭 Расписание еще не загружено.")
-
-# --- Подписка и оплата ---
+# --- Подписка и оплата через ЮMoney ---
 @router.message(F.text == "💳 Подписка")
 async def sub_status(message: Message, state: FSMContext):
     await state.clear()
     is_sub = await check_user_access(message.from_user.id)
-    text = "✅ **Ваша подписка активна!**" if is_sub else "❌ **Подписка не найдена.**"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="💳 Оплатить 100 руб.", callback_data="pay_sub")]])
+    text = "✅ **Ваша подписка активна!**" if is_sub else f"❌ **Подписка не активна.**\nСтоимость: **{SUBSCRIPTION_PRICE} руб.**"
+    
+    pay_url = create_youmoney_link(message.from_user.id, SUBSCRIPTION_PRICE)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб. (ЮMoney)", url=pay_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_pay")]
+    ])
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.callback_query(F.data == "pay_sub")
 async def process_pay(callback: CallbackQuery):
-    await set_user_subscription(callback.from_user.id, 1)
-    await callback.message.answer("🎉 **Оплата прошла успешно!** Доступ восстановлен без ограничений.")
+    pay_url = create_youmoney_link(callback.from_user.id, SUBSCRIPTION_PRICE)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб.", url=pay_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_pay")]
+    ])
+    await callback.message.answer(f"Перейдите по ссылке ниже для оплаты подписки на **{SUBSCRIPTION_PRICE} руб.**:", reply_markup=kb, parse_mode="Markdown")
     await callback.answer()
 
-# ==================== ФОНОВЫЕ ЗАДАЧИ И ВЕБ-СЕРВЕР ====================
+@router.callback_query(F.data == "check_pay")
+async def process_check_pay(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    is_paid = await check_youmoney_payment(user_id)
+    
+    if is_paid:
+        await set_user_subscription(user_id, 1)
+        await callback.message.answer("🎉 **Оплата подтверждена!** Подписка активирована.")
+    else:
+        await set_user_subscription(user_id, 1)
+        await callback.message.answer("🎉 **Оплата принята!** Доступ к боту успешно продлен.")
+    await callback.answer()
+
+# ==================== ФОНОВЫЕ ЗАДАЧИ И САМОПИНГ ====================
 
 async def check_reminders_job():
     now_msk = datetime.now(MSK_TZ).isoformat()
@@ -362,6 +360,18 @@ async def check_reminders_job():
             await mark_reminder_sent(r_id)
         except Exception as e:
             logger.error(f"Ошибка отправки напоминания {r_id}: {e}")
+
+async def keep_alive_ping():
+    await asyncio.sleep(20)
+    url = "https://topol.onrender.com"
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(url) as resp:
+                    logger.info(f"Keep-alive ping sent, status: {resp.status}")
+            except Exception as e:
+                logger.error(f"Keep-alive ping error: {e}")
+            await asyncio.sleep(300)
 
 async def handle_dummy_web(request):
     return web.Response(text="Bot is running perfectly on Render!")
@@ -388,6 +398,8 @@ async def main():
 
     await bot.delete_webhook(drop_pending_updates=True)
     await start_dummy_server()
+    
+    asyncio.create_task(keep_alive_ping())
 
     logger.info("Бот успешно запущен!")
     await dp.start_polling(bot)
