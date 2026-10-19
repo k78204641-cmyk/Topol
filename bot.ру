@@ -159,11 +159,12 @@ router = Router()
 router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
-# ==================== СТАБИЛЬНАЯ ПОГОДА (ТЕКСТОВЫЙ ФОРМАТ) ====================
+# ==================== СТАБИЛЬНАЯ ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
 
 async def fetch_weather(city_name: str) -> str:
     encoded_city = quote(city_name.strip())
-    url = f"https://wttr.in/{encoded_city}?format=4&lang=ru"
+    # Параметр ?m принудительно включает метрическую систему (градусы Цельсия)
+    url = f"https://wttr.in/{encoded_city}?m&format=4&lang=ru"
     headers = {"User-Agent": "curl/7.68.0"}
     timeout = aiohttp.ClientTimeout(total=8)
     
@@ -177,7 +178,7 @@ async def fetch_weather(city_name: str) -> str:
                 if not text or "Unknown location" in text or "Sorry" in text or "<html" in text.lower():
                     return f"❌ Город «{city_name}» не найден. Проверьте правильность написания."
                 
-                return f"🌍 **Погода:**\n\n{text.strip()}"
+                return f"🌍 **Погода (°C):**\n\n{text.strip()}"
     except asyncio.TimeoutError:
         return "⏳ Время ожидания ответа от сервера погоды истекло."
     except Exception as e:
