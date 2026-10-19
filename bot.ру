@@ -159,11 +159,11 @@ router = Router()
 router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
-# ==================== СТАБИЛЬНАЯ ПОГОДА (ЧЕРЕЗ WTTR.IN) ====================
+# ==================== СТАБИЛЬНАЯ ПОГОДА (ТЕКСТОВЫЙ ФОРМАТ) ====================
 
 async def fetch_weather(city_name: str) -> str:
     encoded_city = quote(city_name.strip())
-    url = f"https://wttr.in/{encoded_city}?format=j1&lang=ru"
+    url = f"https://wttr.in/{encoded_city}?format=4&lang=ru"
     headers = {"User-Agent": "curl/7.68.0"}
     timeout = aiohttp.ClientTimeout(total=8)
     
@@ -171,36 +171,18 @@ async def fetch_weather(city_name: str) -> str:
         async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
             async with session.get(url) as resp:
                 if resp.status != 200:
-                    return f"❌ Город «{city_name}» не найден или сервис погоды временно недоступен."
+                    return f"❌ Город «{city_name}» не найден или сервис погоды недоступен."
                 
-                data = await resp.json()
-                current = data.get("current_condition", [{}])[0]
-                temp = current.get("temp_C")
-                humidity = current.get("humidity")
-                wind_kmh = current.get("windspeedKmph")
-                wind_ms = round(float(wind_kmh) / 3.6, 1) if wind_kmh else "?"
+                text = await resp.text()
+                if not text or "Unknown location" in text or "Sorry" in text or "<html" in text.lower():
+                    return f"❌ Город «{city_name}» не найден. Проверьте правильность написания."
                 
-                desc_arr = current.get("weatherDesc", [{}])
-                desc = desc_arr[0].get("value", "") if desc_arr else ""
-                
-                area_arr = data.get("nearest_area", [{}])
-                area = area_arr[0].get("areaName", [{}])[0].get("value", city_name)
-                country_arr = area_arr[0].get("country", [{}])
-                country = country_arr[0].get("value", "") if country_arr else ""
-                country_str = f" ({country})" if country else ""
-
-                return (
-                    f"🌍 **Погода в г. {area}{country_str}:**\n\n"
-                    f"🌤 Описание: {desc}\n"
-                    f"🌡 Температура: **{temp}°C**\n"
-                    f"💧 Влажность: **{humidity}%**\n"
-                    f"💨 Ветер: **{wind_ms} м/с**"
-                )
+                return f"🌍 **Погода:**\n\n{text.strip()}"
     except asyncio.TimeoutError:
         return "⏳ Время ожидания ответа от сервера погоды истекло."
     except Exception as e:
         logger.error(f"Weather error: {e}")
-        return f"❌ Не удалось получить погоду для города «{city_name}». Проверьте правильность написания."
+        return f"❌ Не удалось получить погоду для города «{city_name}»."
 
 def create_youmoney_link(user_id: int, amount: int) -> str:
     comment = f"sub_{user_id}"
