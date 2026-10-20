@@ -12,7 +12,8 @@ import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+    LabeledPrice, PreCheckoutQuery
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -26,12 +27,10 @@ logger = logging.getLogger(__name__)
 
 # Переменные окружения и настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
-YOUMONEY_WALLET = os.getenv("YOUMONEY_WALLET", "41001XXXXXXXXXXXXX") # Ваш кошелек ЮMoney
-YOUMONEY_TOKEN = os.getenv("YOUMONEY_TOKEN", "")                     # Токен API ЮMoney
 
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_PATH = "bot_database.db"
-SUBSCRIPTION_PRICE = 50  # Стоимость подписки в рублях
+SUBSCRIPTION_STARS = 50  # Стоимость подписки в Telegram Звёздах (XTR)
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -117,7 +116,7 @@ class AccessMiddleware(BaseMiddleware):
         user = getattr(event, "from_user", None)
         if user and not user.is_bot:
             message_text = getattr(event, "text", "") or ""
-            if message_text.startswith("/start") or message_text.startswith("/pay") or message_text == "💳 Подписка":
+            if message_text.startswith("/start") or message_text == "💳 Подписка":
                 return await handler(event, data)
             
             is_allowed = await check_user_access(user.id)
@@ -125,10 +124,10 @@ class AccessMiddleware(BaseMiddleware):
                 text = (
                     "🔒 **Ваш бесплатный пробный период (2 дня) истек.**\n\n"
                     f"Для продолжения использования всех функций бота необходимо оформить подписку.\n"
-                    f"Стоимость: **{SUBSCRIPTION_PRICE} руб.**"
+                    f"Стоимость: **{SUBSCRIPTION_STARS} ⭐**"
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб.", callback_data="pay_sub")]
+                    [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_STARS} ⭐", callback_data="pay_sub")]
                 ])
                 if isinstance(event, Message):
                     await event.answer(text, reply_markup=kb, parse_mode="Markdown")
@@ -159,11 +158,10 @@ router = Router()
 router.message.middleware(AccessMiddleware())
 router.callback_query.middleware(AccessMiddleware())
 
-# ==================== СТАБИЛЬНАЯ ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
+# ==================== ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
 
 async def fetch_weather(city_name: str) -> str:
     encoded_city = quote(city_name.strip())
-    # Параметр ?m принудительно включает метрическую систему (градусы Цельсия)
     url = f"https://wttr.in/{encoded_city}?m&format=4&lang=ru"
     headers = {"User-Agent": "curl/7.68.0"}
     timeout = aiohttp.ClientTimeout(total=8)
@@ -184,44 +182,6 @@ async def fetch_weather(city_name: str) -> str:
     except Exception as e:
         logger.error(f"Weather error: {e}")
         return f"❌ Не удалось получить погоду для города «{city_name}»."
-
-def create_youmoney_link(user_id: int, amount: int) -> str:
-    comment = f"sub_{user_id}"
-    return (
-        f"https://yoomoney.ru/quickpay/confirm.xml?"
-        f"receiver={YOUMONEY_WALLET}&"
-        f"quickpay-form=shop&"
-        f"targets=Подписка+на+бота&"
-        f"paymentType=SB&"
-        f"sum={amount}&"
-        f"label={comment}"
-    )
-
-async def check_youmoney_payment(user_id: int) -> bool:
-    if not YOUMONEY_TOKEN:
-        return False
-    url = "https://yoomoney.ru/api/operation-history"
-    headers = {
-        "Authorization": f"Bearer {YOUMONEY_TOKEN}",
-        "Content-Type": "application/x-www-form-encoding"
-    }
-    payload = {
-        "type": "deprecation",
-        "label": f"sub_{user_id}",
-        "records": 5
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, data=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    operations = data.get("operations", [])
-                    for op in operations:
-                        if op.get("status") == "success" and float(op.get("amount", 0)) >= SUBSCRIPTION_PRICE:
-                            return True
-    except Exception as e:
-        logger.error(f"ЮMoney API Error: {e}")
-    return False
 
 # ==================== ХЕНДЛЕРЫ ====================
 
@@ -328,46 +288,47 @@ async def view_tasks_click(message: Message, state: FSMContext):
     
     await message.answer(text, parse_mode="Markdown")
 
-# --- Подписка и оплата через ЮMoney ---
+# --- Подписка через Telegram Stars (XTR) ---
 @router.message(F.text == "💳 Подписка")
 async def sub_status(message: Message, state: FSMContext):
     await state.clear()
     is_sub = await check_user_access(message.from_user.id)
-    text = "✅ **Ваша подписка активна!**" if is_sub else f"❌ **Подписка не активна.**\nСтоимость: **{SUBSCRIPTION_PRICE} руб.**"
-    
-    pay_url = create_youmoney_link(message.from_user.id, SUBSCRIPTION_PRICE)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб. (ЮMoney)", url=pay_url)],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_pay")]
-    ])
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+    if is_sub:
+        await message.answer("✅ **Ваша подписка активна!**", parse_mode="Markdown")
+    else:
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="Подписка на бота",
+            description="Полный доступ ко всем функциям бота",
+            payload="subscription_stars",
+            currency="XTR",
+            prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
+        )
 
 @router.callback_query(F.data == "pay_sub")
-async def process_pay(callback: CallbackQuery):
-    pay_url = create_youmoney_link(callback.from_user.id, SUBSCRIPTION_PRICE)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_PRICE} руб.", url=pay_url)],
-        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="check_pay")]
-    ])
-    await callback.message.answer(f"Перейдите по ссылке ниже для оплаты подписки на **{SUBSCRIPTION_PRICE} руб.**:", reply_markup=kb, parse_mode="Markdown")
+async def process_pay_callback(callback: CallbackQuery):
+    await bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title="Подписка на бота",
+        description="Полный доступ ко всем функциям бота",
+        payload="subscription_stars",
+        currency="XTR",
+        prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
+    )
     await callback.answer()
 
-@router.callback_query(F.data == "check_pay")
-async def process_check_pay(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    is_paid = await check_youmoney_payment(user_id)
-    
-    if is_paid:
-        await set_user_subscription(user_id, 1)
-        await callback.message.answer("🎉 **Оплата подтверждена!** Подписка активирована.")
-    else:
-        await callback.message.answer(
-            "❌ **Оплата не найдена.**\n"
-            "Убедитесь, что вы завершили перевод, или подождите пару минут. "
-            "Если токен ЮMoney не настроен в системе, автоматическая проверка невозможна.",
-            parse_mode="Markdown"
-        )
-    await callback.answer()
+@router.pre_checkout_query()
+async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message):
+    await set_user_subscription(message.from_user.id, 1)
+    await message.answer(
+        "🎉 **Оплата успешно прошла!**\nПодписка активирована. Спасибо!",
+        parse_mode="Markdown",
+        reply_markup=get_main_keyboard()
+    )
 
 # ==================== ФОНОВЫЕ ЗАДАЧИ И САМОПИНГ ====================
 
