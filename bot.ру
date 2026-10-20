@@ -30,7 +30,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASs
 
 MSK_TZ = pytz.timezone("Europe/Moscow")
 DB_PATH = "bot_database.db"
-SUBSCRIPTION_STARS = 50  # Стоимость подписки в Telegram Звёздах (XTR)
+SUBSCRIPTION_STARS = 30  # Стоимость подписки в Telegram Звёздах (XTR) на 30 дней
 
 # ==================== БАЗА ДАННЫХ ====================
 
@@ -40,7 +40,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 registered_at TEXT NOT NULL,
-                is_subscribed INTEGER DEFAULT 0
+                paid_until TEXT DEFAULT NULL
             )
         """)
         await db.execute("""
@@ -56,28 +56,59 @@ async def init_db():
 
 async def get_or_create_user(user_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT registered_at, is_subscribed FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT registered_at, paid_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
             if row:
                 return row
             now_str = datetime.now().isoformat()
-            await db.execute("INSERT INTO users (user_id, registered_at, is_subscribed) VALUES (?, ?, 0)", (user_id, now_str))
+            await db.execute("INSERT INTO users (user_id, registered_at, paid_until) VALUES (?, ?, NULL)", (user_id, now_str))
             await db.commit()
-            return (now_str, 0)
+            return (now_str, None)
+
+async def set_user_subscription(user_id: int, days: int = 30):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT paid_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            current_paid_until = row[0] if row else None
+
+        now = datetime.now()
+        base_time = now
+        if current_paid_until:
+            dt_current = datetime.fromisoformat(current_paid_until)
+            if dt_current > now:
+                base_time = dt_current
+        
+        until_dt = base_time + timedelta(days=days)
+        await db.execute("UPDATE users SET paid_until = ? WHERE user_id = ?", (until_dt.isoformat(), user_id))
+        await db.commit()
+
+async def get_subscription_info(user_id: int):
+    reg_at_str, paid_until_str = await get_or_create_user(user_id)
+    now = datetime.now()
+
+    # 1. Проверяем платную подписку
+    if paid_until_str:
+        paid_until = datetime.fromisoformat(paid_until_str)
+        if paid_until > now:
+            diff = paid_until - now
+            days = diff.days
+            hours = diff.seconds // 3600
+            return "paid", f"{days} дн. {hours} ч."
+
+    # 2. Проверяем 2-дневный пробный период
+    reg_date = datetime.fromisoformat(reg_at_str)
+    trial_end = reg_date + timedelta(days=2)
+    if trial_end > now:
+        diff = trial_end - now
+        days = diff.days
+        hours = diff.seconds // 3600
+        return "trial", f"{days} дн. {hours} ч."
+
+    return "expired", "0 дн."
 
 async def check_user_access(user_id: int) -> bool:
-    reg_at_str, is_sub = await get_or_create_user(user_id)
-    if is_sub == 1:
-        return True
-    reg_date = datetime.fromisoformat(reg_at_str)
-    if datetime.now() - reg_date <= timedelta(days=2):
-        return True
-    return False
-
-async def set_user_subscription(user_id: int, status: int = 1):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET is_subscribed = ? WHERE user_id = ?", (status, user_id))
-        await db.commit()
+    status, _ = await get_subscription_info(user_id)
+    return status in ("paid", "trial")
 
 async def add_reminder(user_id: int, task_text: str, remind_at_iso: str):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -124,7 +155,7 @@ class AccessMiddleware(BaseMiddleware):
                 text = (
                     "🔒 **Ваш бесплатный пробный период (2 дня) истек.**\n\n"
                     f"Для продолжения использования всех функций бота необходимо оформить подписку.\n"
-                    f"Стоимость: **{SUBSCRIPTION_STARS} ⭐**"
+                    f"Стоимость: **{SUBSCRIPTION_STARS} ⭐** на 30 дней."
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_STARS} ⭐", callback_data="pay_sub")]
@@ -292,14 +323,39 @@ async def view_tasks_click(message: Message, state: FSMContext):
 @router.message(F.text == "💳 Подписка")
 async def sub_status(message: Message, state: FSMContext):
     await state.clear()
-    is_sub = await check_user_access(message.from_user.id)
-    if is_sub:
-        await message.answer("✅ **Ваша подписка активна!**", parse_mode="Markdown")
-    else:
+    status, time_left = await get_subscription_info(message.from_user.id)
+    
+    if status == "paid":
+        await message.answer(
+            f"✅ **Ваша подписка активна!**\n"
+            f"⏳ До окончания осталось: **{time_left}**",
+            parse_mode="Markdown"
+        )
+    elif status == "trial":
+        await message.answer(
+            f"ℹ️ У вас действует **пробный период**.\n"
+            f"⏳ До окончания пробного периода осталось: **{time_left}**\n\n"
+            f"Вы можете продлить подписку на 30 дней прямо сейчас:",
+            parse_mode="Markdown"
+        )
         await bot.send_invoice(
             chat_id=message.chat.id,
-            title="Подписка на бота",
-            description="Полный доступ ко всем функциям бота",
+            title="Подписка на 30 дней",
+            description="Полный доступ ко всем функциям бота на 1 месяц",
+            payload="subscription_stars",
+            currency="XTR",
+            prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
+        )
+    else:
+        await message.answer(
+            "🔒 **Срок действия вашего бесплатного периода истек.**\n\n"
+            f"Оформите подписку на 30 дней за **{SUBSCRIPTION_STARS} ⭐**, чтобы продолжить использование бота:",
+            parse_mode="Markdown"
+        )
+        await bot.send_invoice(
+            chat_id=message.chat.id,
+            title="Подписка на 30 дней",
+            description="Полный доступ ко всем функциям бота на 1 месяц",
             payload="subscription_stars",
             currency="XTR",
             prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
@@ -309,8 +365,8 @@ async def sub_status(message: Message, state: FSMContext):
 async def process_pay_callback(callback: CallbackQuery):
     await bot.send_invoice(
         chat_id=callback.message.chat.id,
-        title="Подписка на бота",
-        description="Полный доступ ко всем функциям бота",
+        title="Подписка на 30 дней",
+        description="Полный доступ ко всем функциям бота на 1 месяц",
         payload="subscription_stars",
         currency="XTR",
         prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
@@ -323,9 +379,9 @@ async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
 
 @router.message(F.successful_payment)
 async def successful_payment_handler(message: Message):
-    await set_user_subscription(message.from_user.id, 1)
+    await set_user_subscription(message.from_user.id, 30)
     await message.answer(
-        "🎉 **Оплата успешно прошла!**\nПодписка активирована. Спасибо!",
+        "🎉 **Оплата успешно прошла!**\nПодписка на 30 дней активирована. Спасибо!",
         parse_mode="Markdown",
         reply_markup=get_main_keyboard()
     )
