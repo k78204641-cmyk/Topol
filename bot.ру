@@ -1,445 +1,795 @@
-import os
-import io
-import logging
 import asyncio
-from datetime import datetime, timedelta
-from urllib.parse import quote
-import pytz
+import datetime
+import logging
+import os
+import sys
+from zoneinfo import ZoneInfo
 
 import aiohttp
-from aiohttp import web
 import aiosqlite
-from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
-from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
-    LabeledPrice, PreCheckoutQuery
-)
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.filters import CommandStart, Command
+from aiogram.types import (
+    ContentType,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    LabeledPrice,
+    Message,
+    PreCheckoutQuery,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+    SuccessfulPayment,
+)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from openai import AsyncOpenAI
 
-# Логирование
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 logger = logging.getLogger(__name__)
 
-# Переменные окружения и настройки
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
+# Загрузка переменных окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")("8963614977:AAF0n1l_fVUOGne7cwiKHvypoTuq8DASsgk")
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
+AI_API_KEY = os.getenv("AI_API_KEY")
+MOVIE_API_KEY = os.getenv("MOVIE_API_KEY")
+MUSIC_API_KEY = os.getenv("MUSIC_API_KEY", "")
+PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN")
+YUMONEY_TOKEN = os.getenv("YUMONEY_TOKEN", "")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bot.db")
 
-MSK_TZ = pytz.timezone("Europe/Moscow")
-DB_PATH = "bot_database.db"
-SUBSCRIPTION_STARS = 30  # Стоимость подписки в Telegram Звёздах (XTR) на 30 дней
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+if not BOT_TOKEN:
+    logger.error("Не задан BOT_TOKEN в переменных окружения!")
+    sys.exit(1)
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+router = Router()
+scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
+openai_client = AsyncOpenAI(api_key=AI_API_KEY) if AI_API_KEY else None
+
 
 # ==================== БАЗА ДАННЫХ ====================
-
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
-                registered_at TEXT NOT NULL,
-                paid_until TEXT DEFAULT NULL
+                trial_end TEXT,
+                sub_end TEXT,
+                created_at TEXT
             )
         """)
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
+            CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                task_text TEXT NOT NULL,
-                remind_at TEXT NOT NULL,
-                is_sent INTEGER DEFAULT 0
+                user_id INTEGER,
+                title TEXT,
+                due_time TEXT,
+                is_done INTEGER DEFAULT 0
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                day TEXT,
+                content TEXT,
+                UNIQUE(user_id, day)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT,
+                track_info TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                amount REAL,
+                timestamp TEXT
             )
         """)
         await db.commit()
 
+
 async def get_or_create_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT registered_at, paid_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
+    now = datetime.datetime.now(MOSCOW_TZ)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT trial_end, sub_end FROM users WHERE user_id = ?", (user_id,)) as cursor:
             row = await cursor.fetchone()
-            if row:
-                return row
-            now_str = datetime.now().isoformat()
-            await db.execute("INSERT INTO users (user_id, registered_at, paid_until) VALUES (?, ?, NULL)", (user_id, now_str))
-            await db.commit()
-            return (now_str, None)
-
-async def set_user_subscription(user_id: int, days: int = 30):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT paid_until FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-            current_paid_until = row[0] if row else None
-
-        now = datetime.now()
-        base_time = now
-        if current_paid_until:
-            dt_current = datetime.fromisoformat(current_paid_until)
-            if dt_current > now:
-                base_time = dt_current
-        
-        until_dt = base_time + timedelta(days=days)
-        await db.execute("UPDATE users SET paid_until = ? WHERE user_id = ?", (until_dt.isoformat(), user_id))
-        await db.commit()
-
-async def get_subscription_info(user_id: int):
-    reg_at_str, paid_until_str = await get_or_create_user(user_id)
-    now = datetime.now()
-
-    # 1. Проверяем платную подписку
-    if paid_until_str:
-        paid_until = datetime.fromisoformat(paid_until_str)
-        if paid_until > now:
-            diff = paid_until - now
-            days = diff.days
-            hours = diff.seconds // 3600
-            return "paid", f"{days} дн. {hours} ч."
-
-    # 2. Проверяем 2-дневный пробный период
-    reg_date = datetime.fromisoformat(reg_at_str)
-    trial_end = reg_date + timedelta(days=2)
-    if trial_end > now:
-        diff = trial_end - now
-        days = diff.days
-        hours = diff.seconds // 3600
-        return "trial", f"{days} дн. {hours} ч."
-
-    return "expired", "0 дн."
-
-async def check_user_access(user_id: int) -> bool:
-    status, _ = await get_subscription_info(user_id)
-    return status in ("paid", "trial")
-
-async def add_reminder(user_id: int, task_text: str, remind_at_iso: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO reminders (user_id, task_text, remind_at, is_sent) VALUES (?, ?, ?, 0)",
-            (user_id, task_text, remind_at_iso)
-        )
-        await db.commit()
-
-async def get_user_reminders(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT task_text, remind_at FROM reminders WHERE user_id = ? AND is_sent = 0 ORDER BY remind_at ASC", (user_id,)) as cursor:
-            return await cursor.fetchall()
-
-async def get_pending_reminders(now_iso: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT id, user_id, task_text FROM reminders WHERE remind_at <= ? AND is_sent = 0", (now_iso,)) as cursor:
-            return await cursor.fetchall()
-
-async def mark_reminder_sent(reminder_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE reminders SET is_sent = 1 WHERE id = ?", (reminder_id,))
-        await db.commit()
-
-# ==================== СОСТОЯНИЯ FSM ====================
-
-class FormStates(StatesGroup):
-    waiting_for_city = State()
-    waiting_for_task_text = State()
-    waiting_for_task_datetime = State()
-
-# ==================== MIDDLEWARE ДОСТУПА ====================
-
-class AccessMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        user = getattr(event, "from_user", None)
-        if user and not user.is_bot:
-            message_text = getattr(event, "text", "") or ""
-            if message_text.startswith("/start") or message_text == "💳 Подписка":
-                return await handler(event, data)
-            
-            is_allowed = await check_user_access(user.id)
-            if not is_allowed:
-                text = (
-                    "🔒 **Ваш бесплатный пробный период (2 дня) истек.**\n\n"
-                    f"Для продолжения использования всех функций бота необходимо оформить подписку.\n"
-                    f"Стоимость: **{SUBSCRIPTION_STARS} ⭐** на 30 дней."
+            if not row:
+                trial_end = (now + datetime.timedelta(days=2)).isoformat()
+                await db.execute(
+                    "INSERT INTO users (user_id, trial_end, sub_end, created_at) VALUES (?, ?, ?, ?)",
+                    (user_id, trial_end, None, now.isoformat())
                 )
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"💳 Оплатить {SUBSCRIPTION_STARS} ⭐", callback_data="pay_sub")]
-                ])
-                if isinstance(event, Message):
-                    await event.answer(text, reply_markup=kb, parse_mode="Markdown")
-                elif isinstance(event, CallbackQuery):
-                    await event.message.answer(text, reply_markup=kb, parse_mode="Markdown")
-                    await event.answer()
-                return
+                await db.commit()
+                return trial_end, None
+            return row[0], row[1]
 
-        return await handler(event, data)
 
-# ==================== КЛАВИАТУРА ====================
+async def check_access(user_id: int) -> bool:
+    trial_end_str, sub_end_str = await get_or_create_user(user_id)
+    now = datetime.datetime.now(MOSCOW_TZ)
+    
+    if trial_end_str:
+        trial_end = datetime.datetime.fromisoformat(trial_end_str)
+        if now < trial_end:
+            return True
+            
+    if sub_end_str:
+        sub_end = datetime.datetime.fromisoformat(sub_end_str)
+        if now < sub_end:
+            return True
+            
+    return False
 
-def get_main_keyboard():
+
+# ==================== СОСТОЯНИЯ (FSM) ====================
+class BotStates(StatesGroup):
+    waiting_for_weather_city = State()
+    waiting_for_task_title = State()
+    waiting_for_task_time = State()
+    waiting_for_music_query = State()
+    waiting_for_playlist_name = State()
+    waiting_for_movie_query = State()
+    waiting_for_horoscope_sign = State()
+    waiting_for_horoscope_period = State()
+    waiting_for_schedule_day = State()
+    waiting_for_schedule_content = State()
+    waiting_for_schedule_view_day = State()
+    waiting_for_ai_prompt = State()
+    waiting_for_gdz_query = State()
+
+
+# ==================== КЛАВИАТУРЫ ====================
+def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="☀️ Погода"), KeyboardButton(text="🔮 Гороскоп")],
-            [KeyboardButton(text="⏰ Добавить дело"), KeyboardButton(text="📅 Мои дела")],
-            [KeyboardButton(text="💳 Подписка")]
+            [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="📝 Дела")],
+            [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы")],
+            [KeyboardButton(text="🔮 Гороскоп"), KeyboardButton(text="📅 Расписание")],
+            [KeyboardButton(text="🤖 Нейросеть"), KeyboardButton(text="📚 ГДЗ")],
+            [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True
     )
 
-# ==================== ИНИЦИАЛИЗАЦИЯ ====================
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-router = Router()
-router.message.middleware(AccessMiddleware())
-router.callback_query.middleware(AccessMiddleware())
-
-# ==================== ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
-
-async def fetch_weather(city_name: str) -> str:
-    encoded_city = quote(city_name.strip())
-    url = f"https://wttr.in/{encoded_city}?m&format=4&lang=ru"
-    headers = {"User-Agent": "curl/7.68.0"}
-    timeout = aiohttp.ClientTimeout(total=8)
-    
+# ==================== НАПОМИНАНИЯ (ПЛАНИЩИК) ====================
+async def send_reminder(user_id: int, task_title: str):
     try:
-        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return f"❌ Город «{city_name}» не найден или сервис погоды недоступен."
-                
-                text = await resp.text()
-                if not text or "Unknown location" in text or "Sorry" in text or "<html" in text.lower():
-                    return f"❌ Город «{city_name}» не найден. Проверьте правильность написания."
-                
-                return f"🌍 **Погода (°C):**\n\n{text.strip()}"
-    except asyncio.TimeoutError:
-        return "⏳ Время ожидания ответа от сервера погоды истекло."
+        await bot.send_message(user_id, f"⏰ **Напоминание о задаче!**\n\n{task_title}", parse_mode="Markdown")
     except Exception as e:
-        logger.error(f"Weather error: {e}")
-        return f"❌ Не удалось получить погоду для города «{city_name}»."
+        logger.error(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
 
-# ==================== ХЕНДЛЕРЫ ====================
 
+async def restore_reminders():
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT id, user_id, title, due_time, is_done FROM tasks WHERE is_done = 0") as cursor:
+            rows = await cursor.fetchall()
+            now = datetime.datetime.now(MOSCOW_TZ)
+            for row in rows:
+                task_id, user_id, title, due_time_str, _ = row
+                due_time = datetime.datetime.fromisoformat(due_time_str)
+                if due_time > now:
+                    scheduler.add_job(
+                        send_reminder,
+                        "date",
+                        run_date=due_time,
+                        args=[user_id, title],
+                        id=f"task_{task_id}",
+                        replace_existing=True
+                    )
+
+
+# ==================== КОМАНДЫ /start, /help, /subscription ====================
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await get_or_create_user(message.from_user.id)
-    await message.answer(
-        "👋 **Добро пожаловать!**\n\n"
-        "Вам предоставлен **бесплатный доступ на 2 дня**.\n"
-        "Используйте меню ниже для выбора нужной функции.",
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
+    user_id = message.from_user.id
+    trial_end_str, _ = await get_or_create_user(user_id)
+    trial_end = datetime.datetime.fromisoformat(trial_end_str)
+    now = datetime.datetime.now(MOSCOW_TZ)
+    
+    welcome_text = (
+        "👋 Добро пожаловать! Я ваш многофункциональный бот-помощник.\n\n"
+        f"🎁 Вам предоставлен пробный период до {trial_end.strftime('%d.%m.%Y %H:%M')} (МСК).\n"
+        "Используйте меню ниже для навигации по функциям."
     )
+    await message.answer(welcome_text, reply_markup=main_menu_keyboard())
 
-# --- Погода ---
-@router.message(F.text == "☀️ Погода")
-async def weather_click(message: Message, state: FSMContext):
+
+@router.message(Command("help"))
+@router.message(F.text == "❌ Отмена")
+async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
-    await state.set_state(FormStates.waiting_for_city)
-    await message.answer("🌍 Введите название города (например, *Москва* или *Санкт-Петербург*):", parse_mode="Markdown")
-
-@router.message(FormStates.waiting_for_city)
-async def weather_process(message: Message, state: FSMContext):
-    city = message.text.strip()
-    await message.answer("⏳ Запрашиваю прогноз погоды...")
-    res = await fetch_weather(city)
-    await state.clear()
-    await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
-
-# --- Гороскоп ---
-@router.message(F.text == "🔮 Гороскоп")
-async def horoscope_click(message: Message, state: FSMContext):
-    await state.clear()
-    signs = ["Овен", "Телец", "Близнецы", "Рак", "Лев", "Дева", "Весы", "Скорпион", "Стрелец", "Козерог", "Водолей", "Рыбы"]
-    buttons = [InlineKeyboardButton(text=s, callback_data=f"zodiac_{s}") for s in signs]
-    kb = InlineKeyboardMarkup(inline_keyboard=[buttons[i:i+2] for i in range(0, len(buttons), 2)])
-    await message.answer("✨ Выберите ваш знак зодиака:", reply_markup=kb)
-
-@router.callback_query(F.data.startswith("zodiac_"))
-async def horoscope_select(callback: CallbackQuery):
-    sign = callback.data.split("_")[1]
-    horoscopes = {
-        "Овен": "Сегодня отличный день для новых начинаний и активных действий!",
-        "Телец": "Будьте внимательны к финансам. Отличный день для отдыха.",
-        "Близнецы": "Вас ждут интересные знакомства и яркие новости.",
-        "Рак": "Прислушайтесь к интуиции, она подскажет верный шаг.",
-        "Лев": "День наполнен энергией и вдохновением!",
-        "Дева": "Фокусируйтесь на важных деталях, успех уже близко.",
-        "Весы": "Гармония в общении поможет решить давние вопросы.",
-        "Скорпион": "Ваши идеи найдут поддержку, не бойтесь проявлять себя.",
-        "Стрелец": "Время для новых планов и несложных путешествий.",
-        "Козерог": "Продуктивный день для работы и личного роста.",
-        "Водолей": "Креативность откроет новые двери и возможности.",
-        "Рыбы": "Доверьтесь течению событий, день принесет радость."
-    }
-    text = horoscopes.get(sign, "Сегодня вас ждет удачный день!")
-    await callback.message.answer(f"🔮 **Гороскоп для знака {sign} на сегодня:**\n\n{text}", parse_mode="Markdown")
-    await callback.answer()
-
-# --- Дела и напоминания ---
-@router.message(F.text == "⏰ Добавить дело")
-async def add_task_click(message: Message, state: FSMContext):
-    await state.clear()
-    await state.set_state(FormStates.waiting_for_task_text)
-    await message.answer("📝 Введите описание дела/напоминания:")
-
-@router.message(FormStates.waiting_for_task_text)
-async def process_task_text(message: Message, state: FSMContext):
-    await state.update_data(task_text=message.text.strip())
-    await state.set_state(FormStates.waiting_for_task_datetime)
-    await message.answer(
-        "📅 Введите дату и время напоминания по МСК в формате:\n"
-        "`ГГГГ-ММ-ДД ЧЧ:ММ` (например, `2026-10-18 15:30`)",
-        parse_mode="Markdown"
+    help_text = (
+        "ℹ️ **Справка по боту:**\n\n"
+        "• **🌤 Погода** — текущая температура, ветер и влажность.\n"
+        "• **📝 Дела** — управление задачами и напоминания по МСК.\n"
+        "• **🎵 Музыка** — легальный поиск треков и плейлисты.\n"
+        "• **🎬 Фильмы** — поиск информации о кино и легальные ссылки.\n"
+        "• **🔮 Гороскоп** — ежедневный гороскоп на русском языке.\n"
+        "• **📅 Расписание** — ведение и просмотр расписания занятий.\n"
+        "• **🤖 Нейросеть** — диалоговый режим с AI.\n"
+        "• **📚 ГДЗ** — поиск решений и разбор задач.\n"
+        "• **💎 Подписка** — проверка статуса и продление.\n\n"
+        "Команды: /start, /help, /subscription, /cancel"
     )
+    await message.answer(help_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
-@router.message(FormStates.waiting_for_task_datetime)
-async def process_task_datetime(message: Message, state: FSMContext):
-    dt_text = message.text.strip()
-    try:
-        dt_obj = datetime.strptime(dt_text, "%Y-%m-%d %H:%M")
-        dt_msk = MSK_TZ.localize(dt_obj)
-        data = await state.get_data()
-        await add_reminder(message.from_user.id, data["task_text"], dt_msk.isoformat())
-        await state.clear()
-        await message.answer(f"✅ Напоминание установлено на **{dt_text} (МСК)**!", parse_mode="Markdown", reply_markup=get_main_keyboard())
-    except ValueError:
-        await message.answer("❌ Неверный формат! Введите дату и время как `ГГГГ-ММ-ДД ЧЧ:ММ`:", parse_mode="Markdown")
 
-# --- Просмотр дел ---
-@router.message(F.text == "📅 Мои дела")
-async def view_tasks_click(message: Message, state: FSMContext):
-    await state.clear()
-    reminders = await get_user_reminders(message.from_user.id)
-    if not reminders:
-        await message.answer("📭 У вас нет активных запланированных дел.")
-        return
+@router.message(Command("subscription"))
+@router.message(F.text == "💎 Подписка")
+async def cmd_subscription(message: Message):
+    user_id = message.from_user.id
+    trial_end_str, sub_end_str = await get_or_create_user(user_id)
+    now = datetime.datetime.now(MOSCOW_TZ)
     
-    text = "📅 **Ваши актуальные дела и напоминания:**\n\n"
-    for idx, (task, r_time) in enumerate(reminders, 1):
-        formatted_time = datetime.fromisoformat(r_time).strftime("%d.%m.%Y %H:%M")
-        text += f"{idx}. {task} — ⏰ *{formatted_time} (МСК)*\n"
+    status_msg = "💎 **Статус подписки:**\n\n"
+    active = False
     
-    await message.answer(text, parse_mode="Markdown")
-
-# --- Подписка через Telegram Stars (XTR) ---
-@router.message(F.text == "💳 Подписка")
-async def sub_status(message: Message, state: FSMContext):
-    await state.clear()
-    status, time_left = await get_subscription_info(message.from_user.id)
-    
-    if status == "paid":
-        await message.answer(
-            f"✅ **Ваша подписка активна!**\n"
-            f"⏳ До окончания осталось: **{time_left}**",
-            parse_mode="Markdown"
-        )
-    elif status == "trial":
-        await message.answer(
-            f"ℹ️ У вас действует **пробный период**.\n"
-            f"⏳ До окончания пробного периода осталось: **{time_left}**\n\n"
-            f"Вы можете продлить подписку на 30 дней прямо сейчас:",
-            parse_mode="Markdown"
-        )
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title="Подписка на 30 дней",
-            description="Полный доступ ко всем функциям бота на 1 месяц",
-            payload="subscription_stars",
-            currency="XTR",
-            prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
-        )
+    if trial_end_str:
+        trial_end = datetime.datetime.fromisoformat(trial_end_str)
+        if now < trial_end:
+            active = True
+            remains = trial_end - now
+            hours = int(remains.total_seconds() // 3600)
+            status_msg += f"🟢 Пробный период активен. Осталось: {hours // 24} дн. {hours % 24} ч. (до {trial_end.strftime('%d.%m.%Y %H:%M')})\n"
+        else:
+            status_msg += f"🔴 Пробный период истек ({trial_end.strftime('%d.%m.%Y %H:%M')})\n"
+            
+    if sub_end_str:
+        sub_end = datetime.datetime.fromisoformat(sub_end_str)
+        if now < sub_end:
+            active = True
+            remains = sub_end - now
+            hours = int(remains.total_seconds() // 3600)
+            status_msg += f"🟢 ПИК-Подписка активна до {sub_end.strftime('%d.%m.%Y %H:%M')} (Осталось {hours // 24} дн.)\n"
+        else:
+            status_msg += f"🔴 Подписка истекла\n"
+            
+    keyboard = None
+    if PAYMENT_PROVIDER_TOKEN:
+        keyboard = InlineKeyboardMarkup(inlineKeyboardButton=[
+            [InlineKeyboardButton(text="💳 Оплатить подписку (500 руб / мес)", callback_data="buy_sub")]
+        ])
     else:
-        await message.answer(
-            "🔒 **Срок действия вашего бесплатного периода истек.**\n\n"
-            f"Оформите подписку на 30 дней за **{SUBSCRIPTION_STARS} ⭐**, чтобы продолжить использование бота:",
-            parse_mode="Markdown"
-        )
-        await bot.send_invoice(
-            chat_id=message.chat.id,
-            title="Подписка на 30 дней",
-            description="Полный доступ ко всем функциям бота на 1 месяц",
-            payload="subscription_stars",
-            currency="XTR",
-            prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
-        )
+        status_msg += "\n⚠️ Интеграция платежей в данный момент не настроена администратором (нет PAYMENT_PROVIDER_TOKEN)."
 
-@router.callback_query(F.data == "pay_sub")
-async def process_pay_callback(callback: CallbackQuery):
+    await message.answer(status_msg, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "buy_sub")
+async def process_buy_subscription(callback_query):
+    if not PAYMENT_PROVIDER_TOKEN:
+        await callback_query.answer("Платежный шлюз не настроен.", show_alert=True)
+        return
+        
+    prices = [LabeledPrice(label="Подписка на 1 месяц", amount=50000)] # 500.00 RUB в копейках
     await bot.send_invoice(
-        chat_id=callback.message.chat.id,
-        title="Подписка на 30 дней",
-        description="Полный доступ ко всем функциям бота на 1 месяц",
-        payload="subscription_stars",
-        currency="XTR",
-        prices=[LabeledPrice(label="Подписка на 1 месяц", amount=SUBSCRIPTION_STARS)]
+        chat_id=callback_query.from_user.id,
+        title="Месячная подписка на бота",
+        description="Полный доступ ко всем функциям бота на 30 дней.",
+        payload="monthly_sub_payload",
+        provider_token=PAYMENT_PROVIDER_TOKEN,
+        currency="RUB",
+        prices=prices,
+        start_parameter="subscribe"
     )
-    await callback.answer()
+    await callback_query.answer()
+
 
 @router.pre_checkout_query()
-async def pre_checkout_handler(pre_checkout_query: PreCheckoutQuery):
+async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
 
+
 @router.message(F.successful_payment)
-async def successful_payment_handler(message: Message):
-    await set_user_subscription(message.from_user.id, 30)
+async def process_successful_payment(message: Message):
+    payment: SuccessfulPayment = message.successful_payment
+    user_id = message.from_user.id
+    now = datetime.datetime.now(MOSCOW_TZ)
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT sub_end FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            current_sub_end = datetime.datetime.fromisoformat(row[0]) if row and row[0] and datetime.datetime.fromisoformat(row[0]) > now else now
+            new_sub_end = (current_sub_end + datetime.timedelta(days=30)).isoformat()
+            
+            await db.execute("UPDATE users SET sub_end = ? WHERE user_id = ?", (new_sub_end, user_id))
+            await db.execute("INSERT INTO payments (user_id, amount, timestamp) VALUES (?, ?, ?)", (user_id, payment.total_amount / 100, now.isoformat()))
+            await db.commit()
+            
+    await message.answer("✅ Спасибо за оплату! Ваша подписка успешно продлена на 30 дней.", reply_markup=main_menu_keyboard())
+
+
+# МИКШЕР ПРОВЕРКИ ДОСТУПА ДЛЯ ОСНОВНЫХ ФУНКЦИЙ
+async def check_access_middleware(message: Message) -> bool:
+    if await check_access(message.from_user.id):
+        return True
     await message.answer(
-        "🎉 **Оплата успешно прошла!**\nПодписка на 30 дней активирована. Спасибо!",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
+        "⛔️ Срок вашего пробного периода или подписки истек.\n"
+        "Для использования функций бота пожалуйста оплатите подписку через раздел /subscription.",
+        reply_markup=main_menu_keyboard()
+    )
+    return False
+
+
+# ==================== ПОГОДА ====================
+@router.message(F.text == "🌤 Погода")
+async def weather_start(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    if not WEATHER_API_KEY:
+        await message.answer("⚠️ Сервис погоды временно недоступен (не настроен WEATHER_API_KEY).")
+        return
+    await state.set_state(BotStates.waiting_for_weather_city)
+    await message.answer("Введите название города для получения прогноза погоды:", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(BotStates.waiting_for_weather_city)
+async def weather_get(message: Message, state: FSMContext):
+    city = message.text.strip()
+    await state.clear()
+    
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric&lang=ru"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    await message.answer("❌ Город не найден или ошибка API погоды. Попробуйте еще раз.", reply_markup=main_menu_keyboard())
+                    return
+                data = await resp.json()
+                
+                name = data.get("name", city)
+                temp = data["main"]["temp"]
+                feels_like = data["main"]["feels_like"]
+                humidity = data["main"]["humidity"]
+                wind = data["wind"]["speed"]
+                desc = data["weather"][0]["description"].capitalize()
+                update_time = datetime.datetime.now(MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S")
+                
+                text = (
+                    f"🌤 Погода в городе **{name}**:\n\n"
+                    f"• Температура: **{temp}°C** (ощущается как {feels_like}°C)\n"
+                    f"• Описание: {desc}\n"
+                    f"• Влажность: **{humidity}%**\n"
+                    f"• Скорость ветра: **{wind} м/с**\n\n"
+                    f"🕒 Обновлено: {update_time} (МСК)"
+                )
+                await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Weather error: {e}")
+            await message.answer("❌ Произошла ошибка при запросе погоды.", reply_markup=main_menu_keyboard())
+
+
+# ==================== ДЕЛА И НАПОМИНАНИЯ ====================
+@router.message(F.text == "📝 Дела")
+async def tasks_menu(message: Message):
+    if not await check_access_middleware(message): return
+    user_id = message.from_user.id
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT id, title, due_time, is_done FROM tasks WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="➕ Добавить дело", callback_data="add_task")]
+                ])
+                await message.answer("📝 У вас пока нет запланированных дел.", reply_markup=keyboard)
+                return
+                
+            text = "📝 **Ваши дела и напоминания:**\n\n"
+            buttons = []
+            for r in rows:
+                task_id, title, due_time, is_done = r
+                status = "✅" if is_done else "⏳"
+                time_str = datetime.datetime.fromisoformat(due_time).strftime('%d.%m %H:%M') if due_time else "Без времени"
+                text += f"{status} ID: `{task_id}` | {title} (до {time_str})\n"
+                buttons.append([
+                    InlineKeyboardButton(text=f"✅ Готово #{task_id}", callback_data=f"done_task_{task_id}"),
+                    InlineKeyboardButton(text=f"❌ Удалить #{task_id}", callback_data=f"del_task_{task_id}")
+                ])
+            buttons.append([InlineKeyboardButton(text="➕ Добавить дело", callback_data="add_task")])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "add_task")
+async def callback_add_task(callback_query: CallbackQuery, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_task_title)
+    await callback_query.message.answer("Введите текст новой задачи:", reply_markup=ReplyKeyboardRemove())
+    await callback_query.answer()
+
+
+@router.message(BotStates.waiting_for_task_title)
+async def task_get_title(message: Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(BotStates.waiting_for_task_time)
+    await message.answer("Введите время напоминания в формате `ГГГГ-ММ-ДД ЧЧ:ММ` (по МСК) или отправьте `-` если время не нужно:", parse_mode="Markdown")
+
+
+@router.message(BotStates.waiting_for_task_time)
+async def task_get_time(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    data = await state.get_data()
+    title = data.get("title")
+    time_text = message.text.strip()
+    await state.clear()
+    
+    due_time = None
+    if time_text != "-":
+        try:
+            due_time = datetime.datetime.strptime(time_text, "%Y-%m-%d %H:%M").replace(tzinfo=MOSCOW_TZ)
+        except ValueError:
+            await message.answer("❌ Неверный формат времени. Задача добавлена без напоминания.", reply_markup=main_menu_keyboard())
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO tasks (user_id, title, due_time, is_done) VALUES (?, ?, ?, 0)",
+            (user_id, title, due_time.isoformat() if due_time else None)
+        )
+        task_id = cursor.lastrowid
+        await db.commit()
+        
+        if due_time:
+            scheduler.add_job(
+                send_reminder,
+                "date",
+                run_date=due_time,
+                args=[user_id, title],
+                id=f"task_{task_id}",
+                replace_existing=True
+            )
+            
+    await message.answer("✅ Задача успешно добавлена!", reply_markup=main_menu_keyboard())
+
+
+@router.callback_query(F.data.startswith("done_task_"))
+async def callback_done_task(callback_query):
+    task_id = int(callback_query.data.split("_")[2])
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("UPDATE tasks SET is_done = 1 WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+        await db.commit()
+    await callback_query.answer("Задача отмечена выполненной!")
+    await callback_query.message.edit_text("✅ Задача выполнена.")
+
+
+@router.callback_query(F.data.startswith("del_task_"))
+async def callback_del_task(callback_query):
+    task_id = int(callback_query.data.split("_")[2])
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+        await db.commit()
+    try:
+        scheduler.remove_job(f"task_{task_id}")
+    except Exception:
+        pass
+    await callback_query.answer("Задача удалена!")
+    await callback_query.message.edit_text("❌ Задача удалена.")
+
+
+# ==================== МУЗЫКА ====================
+@router.message(F.text == "🎵 Музыка")
+async def music_menu(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Поиск треков", callback_data="music_search")],
+        [InlineKeyboardButton(text="📂 Мои плейлисты", callback_data="music_playlists")]
+    ])
+    await message.answer("🎵 Выберите раздел музыки (используется легальный каталог iTunes API):", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "music_search")
+async def callback_music_search(callback_query: CallbackQuery, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_music_query)
+    await callback_query.message.answer("Введите исполнителя или название песни для поиска:", reply_markup=ReplyKeyboardRemove())
+    await callback_query.answer()
+
+
+@router.message(BotStates.waiting_for_music_query)
+async def music_perform_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    await state.clear()
+    
+    url = f"https://itunes.apple.com/search?term={query}&entity=song&limit=5&country=RU"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    await message.answer("❌ Ошибка при поиске музыки.", reply_markup=main_menu_keyboard())
+                    return
+                data = await resp.json()
+                results = data.get("results", [])
+                
+                if not results:
+                    await message.answer("Ничего не найдено по вашему запросу.", reply_markup=main_menu_keyboard())
+                    return
+                
+                text = f"🎵 Результаты поиска по запросу *{query}*:\n\n"
+                for idx, track in enumerate(results, 1):
+                    artist = track.get("artistName", "Неизвестен")
+                    track_name = track.get("trackName", "Без названия")
+                    preview_url = track.get("previewUrl")
+                    text += f"{idx}. **{artist}** — {track_name}\n"
+                    if preview_url:
+                        text += f"   [Легальный фрагмент/превью]({preview_url})\n\n"
+                
+                await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Music search error: {e}")
+            await message.answer("❌ Ошибка соединения с музыкальным каталогом.", reply_markup=main_menu_keyboard())
+
+
+@router.callback_query(F.data == "music_playlists")
+async def callback_music_playlists(callback_query):
+    user_id = callback_query.from_user.id
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT id, name, track_info FROM playlists WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            if not rows:
+                await callback_query.message.answer("У вас пока нет сохраненных плейлистов или треков.", reply_markup=main_menu_keyboard())
+                await callback_query.answer()
+                return
+            text = "📂 **Ваши сохраненные треки/плейлисты:**\n\n"
+            for r in rows:
+                text += f"• *{r[1]}*: {r[2]}\n"
+            await callback_query.message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            await callback_query.answer()
+
+
+# ==================== ФИЛЬМЫ ====================
+@router.message(F.text == "🎬 Фильмы")
+async def movies_start(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    if not MOVIE_API_KEY:
+        await message.answer("⚠️ Поиск фильмов временно недоступен (не настроен MOVIE_API_KEY).")
+        return
+    await state.set_state(BotStates.waiting_for_movie_query)
+    await message.answer("Введите название фильма для поиска:", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(BotStates.waiting_for_movie_query)
+async def movies_search(message: Message, state: FSMContext):
+    title = message.text.strip()
+    await state.clear()
+    
+    url = f"https://www.omdbapi.com/?t={title}&apikey={MOVIE_API_KEY}"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, timeout=10) as resp:
+                data = await resp.json()
+                if data.get("Response") == "False":
+                    await message.answer("❌ Фильм не найден.", reply_markup=main_menu_keyboard())
+                    return
+                
+                mov_title = data.get("Title")
+                year = data.get("Year")
+                genre = data.get("Genre")
+                plot = data.get("Plot")
+                imdb_id = data.get("imdbID")
+                
+                text = (
+                    f"🎬 **{mov_title}** ({year})\n\n"
+                    f"• **Жанр:** {genre}\n"
+                    f"• **Описание:** {plot}\n\n"
+                    f"🔗 Легальный просмотр и подробности: [IMDb страница](https://www.imdb.com/title/{imdb_id}/)"
+                )
+                await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown", disable_web_page_preview=True)
+        except Exception as e:
+            logger.error(f"Movie search error: {e}")
+            await message.answer("❌ Ошибка при запросе каталога фильмов.", reply_markup=main_menu_keyboard())
+
+
+# ==================== ГОРОСКОП ====================
+SIGNS = {
+    "aries": "Овен", "taurus": "Телец", "gemini": "Близнецы", "cancer": "Рак",
+    "leo": "Лев", "virgo": "Дева", "libra": "Весы", "scorpio": "Скорпион",
+    "sagittarius": "Стрелец", "capricorn": "Козерог", "aquarius": "Водолей", "pisces": "Рыбы"
+}
+
+@router.message(F.text == "🔮 Гороскоп")
+async def horoscope_start(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    buttons = [
+        [InlineKeyboardButton(text=name, callback_data=f"hsign_{key}")]
+        for key, name in SIGNS.items()
+    ]
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("🔮 Выберите ваш знак зодиака:", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("hsign_"))
+async def horoscope_choose_sign(callback_query: CallbackQuery, state: FSMContext):
+    sign_key = callback_query.data.split("_")[1]
+    await state.update_data(sign=SIGNS[sign_key])
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Сегодня", callback_data="hper_today")],
+        [InlineKeyboardButton(text="Неделя", callback_data="hper_week")],
+        [InlineKeyboardButton(text="Месяц", callback_data="hper_month")]
+    ])
+    await callback_query.message.edit_text("Выберите период гороскопа:", reply_markup=keyboard)
+    await callback_query.answer()
+
+
+@router.callback_query(F.data.startswith("hper_"))
+async def horoscope_get_result(callback_query: CallbackQuery, state: FSMContext):
+    period = callback_query.data.split("_")[1]
+    data = await state.get_data()
+    sign = data.get("sign", "Овен")
+    await state.clear()
+    
+    period_name = {"today": "сегодня", "week": "эту неделю", "month": "этот месяц"}.get(period, "сегодня")
+    
+    # Генерация или выдача структурированного предсказания
+    text = (
+        f"🔮 Гороскоп для знака **{sign}** на {period_name}:\n\n"
+        f"Звезды благоволят вам в начинаниях. Отличный день для реализации творческого потенциала и решения важных задач. Будьте внимательны к деталям.\n\n"
+        f"⚠️ *Примечание:* Данный гороскоп носит исключительно развлекательный характер и не является медицинским, финансовым или юридическим советом."
+    )
+    await callback_query.message.edit_text(text, parse_mode="Markdown")
+    await callback_query.message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+    await callback_query.answer()
+
+
+# ==================== РАСПИСАНИЕ ====================
+@router.message(F.text == "📅 Расписание")
+async def schedule_menu(message: Message):
+    if not await check_access_middleware(message): return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить/Изменить расписание", callback_data="sched_add")],
+        [InlineKeyboardButton(text="📖 Посмотреть расписание", callback_data="sched_view")]
+    ])
+    await message.answer("📅 Управление расписанием занятий:", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "sched_add")
+async def callback_sched_add(callback_query: CallbackQuery, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_schedule_day)
+    await callback_query.message.answer("Введите день недели (например: Понедельник):", reply_markup=ReplyKeyboardRemove())
+    await callback_query.answer()
+
+
+@router.message(BotStates.waiting_for_schedule_day)
+async def schedule_get_day(message: Message, state: FSMContext):
+    await state.update_data(day=message.text.strip().capitalize())
+    await state.set_state(BotStates.waiting_for_schedule_content)
+    await message.answer("Введите расписание для этого дня текстом:")
+
+
+@router.message(BotStates.waiting_for_schedule_content)
+async def schedule_save_content(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    data = await state.get_data()
+    day = data.get("day")
+    content = message.text.strip()
+    await state.clear()
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "INSERT INTO schedules (user_id, day, content) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET content = ?",
+            (user_id, day, content, content)
+        )
+        await db.commit()
+        
+    await message.answer(f"✅ Расписание на **{day}** успешно сохранено!", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "sched_view")
+async def callback_sched_view(callback_query: CallbackQuery):
+    user_id = callback_query.from_user.id
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("SELECT day, content FROM schedules WHERE user_id = ?", (user_id,)) as cursor:
+            rows = await cursor.fetchall()
+            if not rows:
+                await callback_query.message.answer("У вас пока не сохранено ни одного расписания.", reply_markup=main_menu_keyboard())
+                await callback_query.answer()
+                return
+            text = "📅 **Ваше расписание:**\n\n"
+            for r in rows:
+                text += f"📌 **{r[0]}**:\n{r[1]}\n\n"
+            await callback_query.message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            await callback_query.answer()
+
+
+# ==================== НЕЙРОСЕТЬ ====================
+@router.message(F.text == "🤖 Нейросеть")
+async def ai_start(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    if not AI_API_KEY or not openai_client:
+        await message.answer("⚠️ Нейросеть временно недоступна (не настроен AI_API_KEY).")
+        return
+    await state.set_state(BotStates.waiting_for_ai_prompt)
+    await message.answer("🤖 Режим диалога с нейросетью активирован. Задайте ваш вопрос или отправьте запрос:", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(BotStates.waiting_for_ai_prompt)
+async def ai_process(message: Message, state: FSMContext):
+    prompt = message.text.strip()
+    await state.clear()
+    
+    if not openai_client:
+        await message.answer("❌ AI API не инициализирован.", reply_markup=main_menu_keyboard())
+        return
+        
+    try:
+        response = await openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000
+        )
+        answer_text = response.choices[0].message.content
+        await message.answer(answer_text, reply_markup=main_menu_keyboard())
+    except Exception as e:
+        logger.error(f"AI error: {e}")
+        await message.answer("❌ Ошибка при обращении к нейросети. Попробуйте позже.", reply_markup=main_menu_keyboard())
+
+
+# ==================== ПОИСК ГДЗ ====================
+@router.message(F.text == "📚 ГДЗ")
+async def gdz_start(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
+    await state.set_state(BotStates.waiting_for_gdz_query)
+    await message.answer("📚 Введите предмет, класс, автора учебника и номер задания для поиска решения:", reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(BotStates.waiting_for_gdz_query)
+async def gdz_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    await state.clear()
+    
+    if AI_API_KEY and openai_client:
+        try:
+            response = await openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "Ты помощник по учебе. Разбери и объясни решение учебной задачи."},
+                    {"role": "user", "content": f"Помоги разобрать и решить задачу/упражнение: {query}"}
+                ],
+                max_tokens=1000
+            )
+            answer_text = "📚 **Разбор задачи с помощью нейросети:**\n\n" + response.choices[0].message.content
+            await message.answer(answer_text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            return
+        except Exception as e:
+            logger.error(f"GDZ AI error: {e}")
+            
+    await message.answer(
+        "📚 Специализированный легальный каталог ГДЗ отключен или недоступен.\n"
+        "Для разбора задач рекомендуется подключить AI-ключ (AI_API_KEY) для помощи в решении.",
+        reply_markup=main_menu_keyboard()
     )
 
-# ==================== ФОНОВЫЕ ЗАДАЧИ И САМОПИНГ ====================
 
-async def check_reminders_job():
-    now_msk = datetime.now(MSK_TZ).isoformat()
-    reminders = await get_pending_reminders(now_msk)
-    for r_id, u_id, task_text in reminders:
-        try:
-            await bot.send_message(u_id, f"⏰ **НАПОМИНАНИЕ:**\n\n{task_text}", parse_mode="Markdown")
-            await mark_reminder_sent(r_id)
-        except Exception as e:
-            logger.error(f"Ошибка отправки напоминания {r_id}: {e}")
-
-async def keep_alive_ping():
-    await asyncio.sleep(20)
-    url = "https://topol.onrender.com"
-    async with aiohttp.ClientSession() as session:
-        while True:
-            try:
-                async with session.get(url) as resp:
-                    logger.info(f"Keep-alive ping sent, status: {resp.status}")
-            except Exception as e:
-                logger.error(f"Keep-alive ping error: {e}")
-            await asyncio.sleep(300)
-
-async def handle_dummy_web(request):
-    return web.Response(text="Bot is running perfectly on Render!")
-
-async def start_dummy_server():
-    app = web.Application()
-    app.router.add_get("/", handle_dummy_web)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
-# ==================== ЗАПУСК ====================
-
+# ==================== ЗАПУСК БОТА ====================
 async def main():
     await init_db()
-
-    scheduler = AsyncIOScheduler(timezone=MSK_TZ)
-    scheduler.add_job(check_reminders_job, "interval", seconds=30)
+    await restore_reminders()
     scheduler.start()
-
-    dp.include_router(router)
-
-    await bot.delete_webhook(drop_pending_updates=True)
-    await start_dummy_server()
     
-    asyncio.create_task(keep_alive_ping())
-
-    logger.info("Бот успешно запущен!")
+    dp.include_router(router)
+    
+    logger.info("Бот успешно запущен и готов к работе.")
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен.")
