@@ -469,7 +469,6 @@ async def callback_play_track(callback_query: CallbackQuery):
                 await callback_query.answer("Аудиофайл недоступен.", show_alert=True)
                 return
 
-            # Кнопки плеера для переключения
             prev_idx = max(0, idx - 1)
             next_idx = min(len(entries) - 1, idx + 1)
             player_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -537,7 +536,8 @@ async def callback_movie_catalog(callback_query: CallbackQuery):
             text = f"🍿 **Каталог (Страница {page + 1}/10):**\nВыберите фильм для получения постера и видео:"
             buttons = []
             for show in batch:
-                buttons.append([InlineKeyboardButton(text=f"⭐️ {show.get('rating', {}).get('average', 'N/A')} | {show.get('name')}"[:40], callback_data=f"mov_show_{show.get('id')])"])
+                # ИСПРАВЛЕНА СИНТАКСИЧЕСКАЯ ОШИБКА В f-string
+                buttons.append([InlineKeyboardButton(text=f"⭐️ {show.get('rating', {}).get('average', 'N/A')} | {show.get('name')}"[:40], callback_data=f"mov_show_{show.get('id')}")])
 
             nav = []
             if page > 0: nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mov_page_{page-1}"))
