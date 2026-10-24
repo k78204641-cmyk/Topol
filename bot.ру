@@ -608,7 +608,6 @@ async def music_perform_search(message: Message, state: FSMContext):
 
 
 # ==================== ФИЛЬМЫ (КАТАЛОГ 100 С ВИДЕО/ТРЕЙЛЕРАМИ) ====================
-# Стабильный публичный видеофайл (пример демонстрационного HD-ролика Big Buck Bunny) для обеспечения 100% выдачи видео
 SAMPLE_VIDEO_URL = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 
 @router.message(F.text == "🎬 Фильмы")
@@ -682,7 +681,6 @@ async def callback_show_movie_card(callback_query: CallbackQuery):
                 f"🔗 [Официальная страница]({official_site})"
             )
 
-            # Выдаем видеофайл с описанием
             await callback_query.message.answer_video(
                 video=SAMPLE_VIDEO_URL,
                 caption=caption,
@@ -908,7 +906,7 @@ async def background_self_ping():
                         logger.info(f"Self-ping status: {resp.status}")
                 except Exception as e:
                     logger.debug(f"Self-ping exception: {e}")
-            await asyncio.sleep(300)  каждые 5 минут
+            await asyncio.sleep(300)
 
 
 # ==================== ЗАПУСК ====================
