@@ -37,6 +37,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# =========================================================================
+# НАСТРОЙКА ТЕЛЕГРАМ КАНАЛОВ (Вставьте ваши ссылки вместо заглушек ниже)
+# =========================================================================
+TG_CHANNEL_MUSIC_URL = "https://t.me/+KDoi0lI5Ee0zZGEy"   # <-- Вставьте сюда ссылку на музыкальный ТГ канал
+TG_CHANNEL_MOVIES_URL = "https://t.me/+wUgro0L3eSRmYjZi" # <-- Вставьте сюда ссылку на кино ТГ канал
+
 # Токен бота
 BOT_TOKEN = "8963614977:AAHiQQhnkaQpyfXi2wGk_tI6F3D8toBlcxY"
 AI_API_KEY = os.getenv("AI_API_KEY", "")
@@ -123,8 +129,7 @@ class BotStates(StatesGroup):
     waiting_for_weather_city = State()
     waiting_for_task_title = State()
     waiting_for_task_time = State()
-    waiting_for_music_query = State()
-    waiting_for_movie_query = State()
+    waiting_for_custom_task_time = State()
     waiting_for_schedule_day = State()
     waiting_for_schedule_content = State()
     waiting_for_ai_prompt = State()
@@ -136,7 +141,7 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="📝 Дела")],
-            [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы (Zona)")],
+            [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы")],
             [KeyboardButton(text="🔮 Гороскоп"), KeyboardButton(text="📅 Расписание")],
             [KeyboardButton(text="🤖 Нейросеть"), KeyboardButton(text="📸 Решить по фото")],
             [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❌ Отмена")]
@@ -147,7 +152,7 @@ def main_menu_keyboard():
 
 # ==================== ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК МЕНЮ ====================
 @router.message(StateFilter("*"), F.text.in_([
-    "🌤 Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы (Zona)", 
+    "🌤 Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы", 
     "🔮 Гороскоп", "📅 Расписание", "🤖 Нейросеть", 
     "📸 Решить по фото", "💎 Подписка", "❌ Отмена"
 ]))
@@ -160,7 +165,7 @@ async def global_menu_interceptor(message: Message, state: FSMContext):
         return await tasks_menu(message)
     elif text == "🎵 Музыка":
         return await music_menu(message, state)
-    elif text == "🎬 Фильмы (Zona)":
+    elif text == "🎬 Фильмы":
         return await movies_start(message, state)
     elif text == "🔮 Гороскоп":
         return await horoscope_start(message)
@@ -218,10 +223,10 @@ async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
         "ℹ️ **Справка по боту:**\n\n"
-        "• **🌤 Погода** — актуальный прогноз погоды по городам мира.\n"
+        "• **🌤 Погода** — актуальный прогноз погоды по городам.\n"
         "• **📝 Дела** — менеджер задач и уведомлений.\n"
-        "• **🎵 Музыка** — поиск аудиофайлов в высоком качестве.\n"
-        "• **🎬 Фильмы (Zona)** — каталог кино, постеры и видеоролики.\n"
+        "• **🎵 Музыка** — вдохновение и канал с треками.\n"
+        "• **🎬 Фильмы** — развитие фантазии и кино-канал.\n"
         "• **🔮 Гороскоп** — персональный гороскоп на каждый день.\n"
         "• **📅 Расписание** — учебный график.\n"
         "• **🤖 Нейросеть** — умный ассистент.\n"
@@ -309,11 +314,11 @@ async def check_access_middleware(message: Message) -> bool:
     return False
 
 
-# ==================== ПОГОДА ====================
+# ==================== ПОГОДА (ИСПРАВЛЕНА) ====================
 async def weather_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     await state.set_state(BotStates.waiting_for_weather_city)
-    await message.answer("Введите название города для получения точного прогноза погоды:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите название города для получения актуального прогноза погоды:", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(BotStates.waiting_for_weather_city)
@@ -321,33 +326,23 @@ async def weather_get(message: Message, state: FSMContext):
     city = message.text.strip()
     await state.clear()
     
-    # Резервная база координат для гарантированного ответа
-    cities_db = {
-        "москва": (55.7522, 37.6156, "Москва", "Россия"),
-        "санкт-петербург": (59.9386, 30.3141, "Санкт-Петербург", "Россия"),
-        "новосибирск": (55.0415, 82.9346, "Новосибирск", "Россия"),
-        "екатеринбург": (56.8389, 60.6057, "Екатеринбург", "Россия"),
-        "казань": (55.8304, 49.0661, "Казань", "Россия"),
-        "минск": (53.9, 27.5667, "Минск", "Беларусь"),
-        "алматы": (43.2567, 76.9286, "Алматы", "Казахстан"),
-        "ташкент": (41.3111, 69.2797, "Ташкент", "Узбекистан")
-    }
-    
-    lat, lon, name, country = cities_db.get(city.lower(), (55.7522, 37.6156, city, "Россия"))
-    
     async with aiohttp.ClientSession() as session:
         try:
-            if city.lower() not in cities_db:
-                async with session.get(f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=ru&format=json", timeout=6) as resp:
-                    geo_data = await resp.json()
-                    results = geo_data.get("results")
-                    if results:
-                        lat = results[0]["latitude"]
-                        lon = results[0]["longitude"]
-                        name = results[0]["name"]
-                        country = results[0].get("country", "Россия")
+            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
+            async with session.get(geo_url, timeout=10) as resp:
+                geo_data = await resp.json()
+                results = geo_data.get("results")
+                if not results:
+                    await message.answer(f"❌ Город «{city}» не найден. Проверьте правильность написания.", reply_markup=main_menu_keyboard())
+                    return
+                lat = results[0]["latitude"]
+                lon = results[0]["longitude"]
+                name = results[0]["name"]
+                country = results[0].get("country", "")
+                admin1 = results[0].get("admin1", "")
 
-            async with session.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m&timezone=Europe/Moscow", timeout=6) as resp:
+            forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m&timezone=Europe/Moscow"
+            async with session.get(forecast_url, timeout=10) as resp:
                 data = await resp.json()
                 cur = data.get("current", {})
                 temp = cur.get("temperature_2m")
@@ -356,26 +351,23 @@ async def weather_get(message: Message, state: FSMContext):
                 wind = cur.get("wind_speed_10m")
                 
                 if temp is None:
-                    raise ValueError("Empty temperature data")
+                    await message.answer(f"❌ Не удалось получить данные о погоде для города {name}.", reply_markup=main_menu_keyboard())
+                    return
+
+                location_str = f"{name}, {country}" if country else name
+                if admin1 and admin1 != name:
+                    location_str = f"{name} ({admin1}), {country}"
 
                 text = (
-                    f"🌤 Погода в городе **{name}** ({country}):\n\n"
+                    f"🌤 Погода в локации **{location_str}**:\n\n"
                     f"• Температура: **{temp}°C** (ощущается как {feels}°C)\n"
                     f"• Влажность: **{humidity}%**\n"
                     f"• Ветер: **{wind} м/с**"
                 )
                 await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         except Exception as e:
-            logger.error(f"Weather error: {e}")
-            # Надежный фоллбек
-            text = (
-                f"🌤 Погода в городе **{city.capitalize()}** (Россия):\n\n"
-                f"• Температура: **+19°C** (ощущается как +18°C)\n"
-                f"• Влажность: **58%**\n"
-                f"• Ветер: **3.2 м/с**\n\n"
-                f"*(Актуальный метеопрогноз)*"
-            )
-            await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            logger.error(f"Weather error for city {city}: {e}")
+            await message.answer(f"❌ Ошибка получения погоды для города «{city}». Сервер временно недоступен.", reply_markup=main_menu_keyboard())
 
 
 # ==================== ДЕЛА И НАПОМИНАНИЯ ====================
@@ -396,7 +388,7 @@ async def tasks_menu(message: Message):
                 for r in rows:
                     task_id, title, due_time, is_done = r
                     status = "✅" if is_done else "⏳"
-                    time_str = datetime.datetime.fromisoformat(due_time).strftime('%d.%m %H:%M') if due_time else "Без времени"
+                    time_str = datetime.datetime.fromisoformat(due_time).strftime('%d.%m.%Y %H:%M') if due_time else "Без времени"
                     text += f"{status} `{title}` — до {time_str}\n"
                     buttons.append([
                         InlineKeyboardButton(text=f"✅ Выполнить #{task_id}", callback_data=f"done_task_{task_id}"),
@@ -422,9 +414,61 @@ async def task_get_title(message: Message, state: FSMContext):
     await state.set_state(BotStates.waiting_for_task_time)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡️ Через 1 час", callback_data="time_1h"), InlineKeyboardButton(text="🌙 Сегодня в 20:00", callback_data="time_today")],
-        [InlineKeyboardButton(text="☀️ Завтра в 09:00", callback_data="time_tom9"), InlineKeyboardButton(text="🚫 Без напоминания", callback_data="time_none")]
+        [InlineKeyboardButton(text="☀️ Завтра в 09:00", callback_data="time_tom9"), InlineKeyboardButton(text="🚫 Без напоминания", callback_data="time_none")],
+        [InlineKeyboardButton(text="✏️ Ввести своё время", callback_data="time_custom")]
     ])
-    await message.answer("🕒 Выберите время напоминания:", reply_markup=keyboard)
+    await message.answer("🕒 Выберите время напоминания или укажите своё:", reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "time_custom", BotStates.waiting_for_task_time)
+async def task_custom_time_prompt(callback_query: CallbackQuery, state: FSMContext):
+    await state.set_state(BotStates.waiting_for_custom_task_time)
+    await callback_query.message.answer(
+        "⌨️ Введите дату и время в формате:\n`ДД.ММ.ГГГГ ЧЧ:ММ` (например, `28.10.2026 15:30`)\nили просто время для сегодняшнего дня:\n`ЧЧ:ММ` (например, `18:45`)",
+        parse_mode="Markdown",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await callback_query.answer()
+
+
+@router.message(BotStates.waiting_for_custom_task_time)
+async def task_save_custom_time(message: Message, state: FSMContext):
+    text_input = message.text.strip()
+    data = await state.get_data()
+    title = data.get("title")
+    await state.clear()
+    
+    now = datetime.datetime.now(MOSCOW_TZ)
+    due_time = None
+    
+    try:
+        if len(text_input.split()) == 2:
+            due_time = datetime.datetime.strptime(text_input, "%d.%m.%Y %H:%M").replace(tzinfo=MOSCOW_TZ)
+        elif len(text_input.split()) == 1 and ":" in text_input:
+            h, m = map(int, text_input.split(":"))
+            due_time = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if due_time <= now:
+                due_time += datetime.timedelta(days=1)
+        else:
+            raise ValueError("Invalid format")
+    except Exception:
+        await message.answer("❌ Неверный формат времени. Задача сохранена **без напоминания**.", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+        due_time = None
+
+    user_id = message.from_user.id
+    try:
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute("INSERT INTO tasks (user_id, title, due_time, is_done) VALUES (?, ?, ?, 0)", (user_id, title, due_time.isoformat() if due_time else None))
+            task_id = cursor.lastrowid
+            await db.commit()
+            if due_time and due_time > now:
+                scheduler.add_job(send_reminder, "date", run_date=due_time, args=[user_id, title], id=f"task_{task_id}", replace_existing=True)
+
+        time_str = due_time.strftime('%d.%m.%Y %H:%M') if due_time else "Без напоминания"
+        await message.answer(f"✅ Задача **«{title}»** сохранена!\n⏰ Напоминание: {time_str}", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Task save error: {e}")
+        await message.answer("❌ Запрос выдать не получилось. Попробуйте позже.", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data.startswith("time_"), BotStates.waiting_for_task_time)
@@ -462,7 +506,7 @@ async def callback_done_task(callback_query: CallbackQuery):
     task_id = int(callback_query.data.split("_")[2])
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("UPDATE tasks SET is_done = 1 WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+            async with db.execute("UPDATE tasks SET is_done = 1 WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
             await db.commit()
         await callback_query.answer("Задача выполнена!")
         await callback_query.message.edit_text("✅ Задача отмечена выполненной.")
@@ -476,7 +520,7 @@ async def callback_del_task(callback_query: CallbackQuery):
     task_id = int(callback_query.data.split("_")[2])
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+            async with db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
             await db.commit()
         try: scheduler.remove_job(f"task_{task_id}")
         except Exception: pass
@@ -487,214 +531,32 @@ async def callback_del_task(callback_query: CallbackQuery):
         await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
-# ==================== МУЗЫКА (JAMENDO API + АУДИОФОРМАТ) ====================
-RECOMMENDED_QUERIES = ["Pop Hits", "Rock", "Electronic", "Ambient", "Jazz"]
-
+# ==================== МУЗЫКА (Вдохновение + Ссылка на ТГ канал) ====================
 async def music_menu(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
+    text = (
+        "🎵 **Музыка — это универсальный язык души.**\n\n"
+        "Она вдохновляет на великие свершения, помогает пережить трудные моменты, снимает усталость "
+        "и наполняет каждый день яркими эмоциями."
+    )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск трека (Jamendo)", callback_data="m_search_mode")],
-        [InlineKeyboardButton(text="🔥 Топ-хиты чартов", callback_data="m_rec_0")],
-        [InlineKeyboardButton(text="💡 Жанры и подборки", callback_data="m_recs")]
+        [InlineKeyboardButton(text="🎧 Слушать в нашем ТГ-канале", url=TG_CHANNEL_MUSIC_URL)]
     ])
-    await message.answer("🎵 **Музыкальный центр**\nВыберите нужный раздел:", reply_markup=keyboard, parse_mode="Markdown")
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-@router.callback_query(F.data == "m_search_mode")
-async def callback_music_search_mode(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_music_query)
-    await callback_query.message.answer("🔎 Введите название песни или исполнителя:", reply_markup=ReplyKeyboardRemove())
-    await callback_query.answer()
-
-
-@router.message(BotStates.waiting_for_music_query)
-async def music_perform_search(message: Message, state: FSMContext):
-    query = message.text.strip()
-    await state.clear()
-    await search_and_send_music(message, query)
-
-
-async def search_and_send_music(message: Message, query: str):
-    search_msg = await message.answer(f"🔍 Ищу аудио по запросу: *«{query}»*...", parse_mode="Markdown")
-    async with aiohttp.ClientSession() as session:
-        try:
-            url = f"https://api.jamendo.com/v3.0/tracks/?client_id=5c399a9a&format=json&limit=3&namesearch={urllib.parse.quote(query)}"
-            async with session.get(url, timeout=6) as resp:
-                data = await resp.json()
-                results = data.get("results", [])
-                
-                try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
-                except Exception: pass
-                
-                if results:
-                    for track in results:
-                        title = track.get("name", "Трек")
-                        artist = track.get("artist_name", "Исполнитель")
-                        audio_url = track.get("audio")
-                        if audio_url:
-                            await message.answer_audio(
-                                audio=audio_url,
-                                caption=f"🎵 **{artist} — {title}**\n*(Формат: Аудио)*",
-                                parse_mode="Markdown"
-                            )
-                    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
-                    return
-        except Exception as e:
-            logger.error(f"Jamendo API error: {e}")
-
-        try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
-        except Exception: pass
-
-        # Резервный качественный аудиофайл
-        await message.answer_audio(
-            audio="https://commondatastorage.googleapis.com/codesign-bucket/sample.mp3",
-            caption=f"🎵 **Хит по запросу: {query}**\n*(Выдан из резервной аудиобезвыходной базы)*",
-            parse_mode="Markdown"
-        )
-        await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
-
-
-@router.callback_query(F.data == "m_recs")
-async def callback_music_recommendations(callback_query: CallbackQuery):
-    buttons = [
-        [InlineKeyboardButton(text=f"🎧 {q}", callback_data=f"m_rec_q_{idx}")]
-        for idx, q in enumerate(RECOMMENDED_QUERIES)
-    ]
-    buttons.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="m_back")])
-    await callback_query.message.edit_text("💡 **Популярные музыкальные жанры:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
-    await callback_query.answer()
-
-
-@router.callback_query(F.data.startswith("m_rec_q_"))
-async def callback_music_rec_query(callback_query: CallbackQuery):
-    q_idx = int(callback_query.data.split("_")[3])
-    query = RECOMMENDED_QUERIES[q_idx]
-    await callback_query.answer()
-    await search_and_send_music(callback_query.message, query)
-
-
-@router.callback_query(F.data == "m_back")
-async def callback_music_back(callback_query: CallbackQuery):
-    await callback_query.message.answer("Главное меню:", reply_markup=main_menu_keyboard())
-    await callback_query.answer()
-
-
-# ==================== ФИЛЬМЫ (ZONA БАЗА + ФОРМАТ ВИДЕО) ====================
-MOVIE_RECOMMENDATIONS = ["Интерстеллар", "Матрица", "Аватар", "Тёмный рыцарь", "Оппенгеймер"]
-
-ZONA_CINEMA_DB = {
-    "интерстеллар": {
-        "name": "Интерстеллар (Interstellar)",
-        "rating": "8.6",
-        "genre": "Фантастика, Драма, Космос",
-        "desc": "Эпическая научно-фантастическая драма о путешествии сквозь червоточину в поисках нового дома для человечества.",
-        "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28994.jpg",
-        "video": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4"
-    },
-    "матрица": {
-        "name": "Матрица (The Matrix)",
-        "rating": "8.7",
-        "genre": "Фантастика, Боевик, Киберпанк",
-        "desc": "Хакер Neo узнает правду о виртуальной реальности и вступает в войну против машин.",
-        "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28995.jpg",
-        "video": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4"
-    },
-    "аватар": {
-        "name": "Аватар (Avatar)",
-        "rating": "7.9",
-        "genre": "Фантастика, Приключения",
-        "desc": "Бывший морпех на чужой планете оказывается перед выбором между долгом и новым миром.",
-        "poster": "https://static.tvmaze.com/uploads/images/original_untouched/403/1008595.jpg",
-        "video": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-    },
-    "default": {
-        "name": "Киноблокбастер из каталога Zona",
-        "rating": "8.5",
-        "genre": "Драма, Приключения, Экшен",
-        "desc": "Захватывающий полноформатный фильм в высоком качестве с полным погружением в сюжет.",
-        "poster": "https://static.tvmaze.com/uploads/images/original_untouched/424/1061052.jpg",
-        "video": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4"
-    }
-}
-
+# ==================== ФИЛЬМЫ (Фантазия + Ссылка на ТГ канал) ====================
 async def movies_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск в базе Zona", callback_data="mov_search_mode")],
-        [InlineKeyboardButton(text="🎲 Случайный фильм (Zona)", callback_data="mov_random")],
-        [InlineKeyboardButton(text="💡 Рекомендации Zona", callback_data="mov_recs")]
-    ])
-    await message.answer("🎬 **Каталог фильмов и сериалов (Zona)**\nВыберите нужный раздел:", reply_markup=keyboard, parse_mode="Markdown")
-
-
-@router.callback_query(F.data == "mov_search_mode")
-async def callback_mov_search_mode(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_movie_query)
-    await callback_query.message.answer("🔎 Введите название фильма для поиска в базе Zona:", reply_markup=ReplyKeyboardRemove())
-    await callback_query.answer()
-
-
-@router.message(BotStates.waiting_for_movie_query)
-async def movies_search(message: Message, state: FSMContext):
-    query = message.text.strip()
-    await state.clear()
-    await search_and_send_zona_movie(message, query)
-
-
-async def search_and_send_zona_movie(message: Message, query: str):
-    search_msg = await message.answer(f"🔍 Ищу в базе Zona: *«{query}»*...", parse_mode="Markdown")
-    q_lower = query.lower()
-    
-    matched = None
-    for k, v in ZONA_CINEMA_DB.items():
-        if k in q_lower or q_lower in k:
-            matched = v
-            break
-
-    if not matched:
-        matched = ZONA_CINEMA_DB["default"]
-        matched["name"] = f"{query.capitalize()} (Zona HD)"
-
-    try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
-    except Exception: pass
-    
-    caption = f"🎬 **{matched['name']}**\n⭐️ Рейтинг: {matched['rating']} | 🎭 {matched['genre']}\n\n📝 {matched['desc']}"
-    await message.answer_photo(photo=matched['poster'], caption=caption, parse_mode="Markdown")
-    await message.answer_video(
-        video=matched['video'],
-        caption=f"▶️ Полный видеофайл (Zona): *{matched['name']}*",
-        parse_mode="Markdown"
+    text = (
+        "🎬 **Кинематограф развивает фантазию и воображение.**\n\n"
+        "Фильмы позволяют нам путешествовать по другим мирам, проживать сотни жизней за пару часов "
+        "и смотреть на привычные вещи под совершенно новым углом."
     )
-    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
-
-
-@router.callback_query(F.data == "mov_random")
-async def callback_movie_random(callback_query: CallbackQuery):
-    rand_key = random.choice([k for k in ZONA_CINEMA_DB.keys() if k != "default"])
-    movie = ZONA_CINEMA_DB[rand_key]
-    caption = f"🎲 **Случайный выбор из базы Zona:**\n🎬 **{movie['name']}**\n⭐️ Рейтинг: {movie['rating']}\n\n📝 {movie['desc']}"
-    await callback_query.message.answer_photo(photo=movie['poster'], caption=caption, parse_mode="Markdown")
-    await callback_query.message.answer_video(video=movie['video'], caption=f"▶️ Полный видеофайл (Zona)", parse_mode="Markdown")
-    await callback_query.answer()
-
-
-@router.callback_query(F.data == "mov_recs")
-async def callback_movie_recs(callback_query: CallbackQuery):
-    buttons = [
-        [InlineKeyboardButton(text=f"🎬 {m}", callback_data=f"mov_rec_q_{idx}")]
-        for idx, m in enumerate(MOVIE_RECOMMENDATIONS)
-    ]
-    buttons.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="m_back")])
-    await callback_query.message.edit_text("💡 **Рекомендации из базы Zona:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
-    await callback_query.answer()
-
-
-@router.callback_query(F.data.startswith("mov_rec_q_"))
-async def callback_movie_rec_query(callback_query: CallbackQuery):
-    q_idx = int(callback_query.data.split("_")[3])
-    query = MOVIE_RECOMMENDATIONS[q_idx]
-    await callback_query.answer()
-    await search_and_send_zona_movie(callback_query.message, query)
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍿 Смотреть в нашем ТГ-канале", url=TG_CHANNEL_MOVIES_URL)]
+    ])
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 # ==================== ГОРОСКОП ====================
