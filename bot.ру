@@ -314,60 +314,46 @@ async def check_access_middleware(message: Message) -> bool:
     return False
 
 
-# ==================== ПОГОДА ====================
-async def weather_start(message: Message, state: FSMContext):
-    if not await check_access_middleware(message): return
-    await state.set_state(BotStates.waiting_for_weather_city)
-    await message.answer("Введите название города для получения актуального прогноза погоды:", reply_markup=ReplyKeyboardRemove())
+# ==================== ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
 
-
-@router.message(BotStates.waiting_for_weather_city)
-async def weather_get(message: Message, state: FSMContext):
-    city = message.text.strip()
-    await state.clear()
+async def fetch_weather(city_name: str) -> str:
+    encoded_city = quote(city_name.strip())
+    url = f"https://wttr.in/{encoded_city}?m&format=4&lang=ru"
+    headers = {"User-Agent": "curl/7.68.0"}
+    timeout = aiohttp.ClientTimeout(total=8)
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
-            async with session.get(geo_url, timeout=5) as resp:
-                geo_data = await resp.json()
-                results = geo_data.get("results")
-                if not results:
-                    await message.answer(f"❌ Город «{city}» не найден. Проверьте правильность написания.", reply_markup=main_menu_keyboard())
-                    return
-                lat = results[0]["latitude"]
-                lon = results[0]["longitude"]
-                name = results[0]["name"]
-                country = results[0].get("country", "")
-                admin1 = results[0].get("admin1", "")
-
-            forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m&timezone=Europe/Moscow"
-            async with session.get(forecast_url, timeout=5) as resp:
-                data = await resp.json()
-                cur = data.get("current", {})
-                temp = cur.get("temperature_2m")
-                feels = cur.get("apparent_temperature")
-                humidity = cur.get("relative_humidity_2m")
-                wind = cur.get("wind_speed_10m")
+    try:
+        async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return f"❌ Город «{city_name}» не найден или сервис погоды недоступен."
                 
-                if temp is None:
-                    await message.answer(f"❌ Не удалось получить показатели погоды для города {name}.", reply_markup=main_menu_keyboard())
-                    return
+                text = await resp.text()
+                if not text or "Unknown location" in text or "Sorry" in text or "<html" in text.lower():
+                    return f"❌ Город «{city_name}» не найден. Проверьте правильность написания."
+                
+                return f"🌍 **Погода (°C):**\n\n{text.strip()}"
+    except asyncio.TimeoutError:
+        return "⏳ Время ожидания ответа от сервера погоды истекло."
+    except Exception as e:
+        logger.error(f"Weather error: {e}")
+        return f"❌ Не удалось получить погоду для города «{city_name}»."
 
-                location_str = f"{name}, {country}" if country else name
-                if admin1 and admin1 != name:
-                    location_str = f"{name} ({admin1}), {country}"
+# --- Хендлеры погоды ---
 
-                text = (
-                    f"🌤 Погода в локации **{location_str}**:\n\n"
-                    f"• Температура: **{temp}°C** (ощущается как {feels}°C)\n"
-                    f"• Влажность: **{humidity}%**\n"
-                    f"• Ветер: **{wind} м/с**"
-                )
-                await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Weather error for city {city}: {e}")
-            await message.answer(f"❌ Запрос выдать не получилось. Сервер погоды временно недоступен.", reply_markup=main_menu_keyboard())
+@router.message(F.text == "☀️ Погода")
+async def weather_click(message: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(FormStates.waiting_for_city)
+    await message.answer("🌍 Введите название города (например, *Москва* или *Санкт-Петербург*):", parse_mode="Markdown")
+
+@router.message(FormStates.waiting_for_city)
+async def weather_process(message: Message, state: FSMContext):
+    city = message.text.strip()
+    await message.answer("⏳ Запрашиваю прогноз погоды...")
+    res = await fetch_weather(city)
+    await state.clear()
+    await message.answer(res, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 
 # ==================== ДЕЛА И НАПОМИНАНИЯ ====================
