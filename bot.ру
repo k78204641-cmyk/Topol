@@ -38,10 +38,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# НАСТРОЙКА ТЕЛЕГРАМ КАНАЛОВ (Вставьте ваши ссылки вместо заглушек ниже)
+# НАСТРОЙКА ССЫЛОК НА ТЕЛЕГРАМ КАНАЛЫ
 # =========================================================================
-TG_CHANNEL_MUSIC_URL = "https://t.me/+KDoi0lI5Ee0zZGEy"   # <-- Вставьте сюда ссылку на музыкальный ТГ канал
-TG_CHANNEL_MOVIES_URL = "https://t.me/+wUgro0L3eSRmYjZi" # <-- Вставьте сюда ссылку на кино ТГ канал
+TG_CHANNEL_MUSIC_URL = "https://t.me/+KDoi0lI5Ee0zZGEy"   # <-- Вставьте сюда ссылку на музыкальный канал
+TG_CHANNEL_MOVIES_URL = "https://t.me/+wUgro0L3eSRmYjZi" # <-- Вставьте сюда ссылку на кино-канал
 
 # Токен бота
 BOT_TOKEN = "8963614977:AAHiQQhnkaQpyfXi2wGk_tI6F3D8toBlcxY"
@@ -225,8 +225,8 @@ async def cmd_help(message: Message, state: FSMContext):
         "ℹ️ **Справка по боту:**\n\n"
         "• **🌤 Погода** — актуальный прогноз погоды по городам.\n"
         "• **📝 Дела** — менеджер задач и уведомлений.\n"
-        "• **🎵 Музыка** — вдохновение и канал с треками.\n"
-        "• **🎬 Фильмы** — развитие фантазии и кино-канал.\n"
+        "• **🎵 Музыка** — вдохновение и ссылка на музыкальный канал.\n"
+        "• **🎬 Фильмы** — развитие фантазии и ссылка на кино-канал.\n"
         "• **🔮 Гороскоп** — персональный гороскоп на каждый день.\n"
         "• **📅 Расписание** — учебный график.\n"
         "• **🤖 Нейросеть** — умный ассистент.\n"
@@ -329,7 +329,7 @@ async def weather_get(message: Message, state: FSMContext):
     async with aiohttp.ClientSession() as session:
         try:
             geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(city)}&count=1&language=ru&format=json"
-            async with session.get(geo_url, timeout=10) as resp:
+            async with session.get(geo_url, timeout=5) as resp:
                 geo_data = await resp.json()
                 results = geo_data.get("results")
                 if not results:
@@ -342,7 +342,7 @@ async def weather_get(message: Message, state: FSMContext):
                 admin1 = results[0].get("admin1", "")
 
             forecast_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m&timezone=Europe/Moscow"
-            async with session.get(forecast_url, timeout=10) as resp:
+            async with session.get(forecast_url, timeout=5) as resp:
                 data = await resp.json()
                 cur = data.get("current", {})
                 temp = cur.get("temperature_2m")
@@ -351,7 +351,7 @@ async def weather_get(message: Message, state: FSMContext):
                 wind = cur.get("wind_speed_10m")
                 
                 if temp is None:
-                    await message.answer(f"❌ Не удалось получить данные о погоде для города {name}.", reply_markup=main_menu_keyboard())
+                    await message.answer(f"❌ Не удалось получить показатели погоды для города {name}.", reply_markup=main_menu_keyboard())
                     return
 
                 location_str = f"{name}, {country}" if country else name
@@ -367,7 +367,7 @@ async def weather_get(message: Message, state: FSMContext):
                 await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Weather error for city {city}: {e}")
-            await message.answer(f"❌ Ошибка получения погоды для города «{city}». Сервер временно недоступен.", reply_markup=main_menu_keyboard())
+            await message.answer(f"❌ Запрос выдать не получилось. Сервер погоды временно недоступен.", reply_markup=main_menu_keyboard())
 
 
 # ==================== ДЕЛА И НАПОМИНАНИЯ ====================
@@ -531,9 +531,13 @@ async def callback_del_task(callback_query: CallbackQuery):
         await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
-# ==================== МУЗЫКА (Вдохновение + Кнопка Слушать) ====================
+# ==================== МУЗЫКА (ПРЯМАЯ ССЫЛКА С ПРОВЕРКОЙ ПОДПИСКИ) ====================
 async def music_menu(message: Message, state: FSMContext):
-    if not await check_access_middleware(message): return
+    user_id = message.from_user.id
+    if not await check_access(user_id):
+        await message.answer("⛔️ Доступ к каналу доступен только при активной подписке или пробном периоде! Оформите её в разделе /subscription.", reply_markup=main_menu_keyboard())
+        return
+
     text = (
         "🎵 **Музыка — это универсальный язык души.**\n\n"
         "Она вдохновляет на великие свершения, помогает пережить трудные моменты, снимает усталость "
@@ -545,9 +549,13 @@ async def music_menu(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# ==================== ФИЛЬМЫ (Фантазия + Кнопка Смотреть) ====================
+# ==================== ФИЛЬМЫ (ПРЯМАЯ ССЫЛКА С ПРОВЕРКОЙ ПОДПИСКИ) ====================
 async def movies_start(message: Message, state: FSMContext):
-    if not await check_access_middleware(message): return
+    user_id = message.from_user.id
+    if not await check_access(user_id):
+        await message.answer("⛔️ Доступ к каналу доступен только при активной подписке или пробном периоде! Оформите её в разделе /subscription.", reply_markup=main_menu_keyboard())
+        return
+
     text = (
         "🎬 **Кинематограф развивает фантазию и воображение.**\n\n"
         "Фильмы позволяют нам путешествовать по другим мирам, проживать сотни жизней за пару часов "
