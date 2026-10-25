@@ -135,7 +135,7 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="📝 Дела")],
-            [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы")],
+            [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы (Zona)")],
             [KeyboardButton(text="🔮 Гороскоп"), KeyboardButton(text="📅 Расписание")],
             [KeyboardButton(text="🤖 Нейросеть"), KeyboardButton(text="📸 Решить по фото")],
             [KeyboardButton(text="💎 Подписка"), KeyboardButton(text="❌ Отмена")]
@@ -146,7 +146,7 @@ def main_menu_keyboard():
 
 # ==================== ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК МЕНЮ ====================
 @router.message(StateFilter("*"), F.text.in_([
-    "🌤 Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы", 
+    "🌤 Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы (Zona)", 
     "🔮 Гороскоп", "📅 Расписание", "🤖 Нейросеть", 
     "📸 Решить по фото", "💎 Подписка", "❌ Отмена"
 ]))
@@ -159,7 +159,7 @@ async def global_menu_interceptor(message: Message, state: FSMContext):
         return await tasks_menu(message)
     elif text == "🎵 Музыка":
         return await music_menu(message, state)
-    elif text == "🎬 Фильмы":
+    elif text == "🎬 Фильмы (Zona)":
         return await movies_start(message, state)
     elif text == "🔮 Гороскоп":
         return await horoscope_start(message)
@@ -217,10 +217,10 @@ async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
         "ℹ️ **Справка по боту:**\n\n"
-        "• **🌤 Погода** — прогноз погоды.\n"
+        "• **🌤 Погода** — реальный прогноз по городам мира.\n"
         "• **📝 Дела** — задачи и напоминания.\n"
-        "• **🎵 Музыка** — плеер, чарты и поиск.\n"
-        "• **🎬 Фильмы** — постеры, трейлеры и каталог.\n"
+        "• **🎵 Музыка** — плеер, чарты и поиск треков.\n"
+        "• **🎬 Фильмы (Zona)** — база фильмов, сериалов, постеров и трейлеров.\n"
         "• **🔮 Гороскоп** — уникальный гороскоп для каждого знака.\n"
         "• **📅 Расписание** — учебное расписание.\n"
         "• **🤖 Нейросеть** — диалог с AI.\n"
@@ -308,11 +308,11 @@ async def check_access_middleware(message: Message) -> bool:
     return False
 
 
-# ==================== ПОГОДА (УКРЕПЛЕННАЯ С ФОЛЛБЕКОМ) ====================
+# ==================== ПОГОДА (ИСПРАВЛЕННАЯ С РЕАЛЬНЫМИ ДАННЫМИ) ====================
 async def weather_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     await state.set_state(BotStates.waiting_for_weather_city)
-    await message.answer("Введите название города для получения прогноза погоды:", reply_markup=ReplyKeyboardRemove())
+    await message.answer("Введите название города для получения актуального прогноза погоды:", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(BotStates.waiting_for_weather_city)
@@ -320,20 +320,21 @@ async def weather_get(message: Message, state: FSMContext):
     city = message.text.strip()
     await state.clear()
     
-    # Резервные координаты на случай сбоя геокодера (Москва)
-    lat, lon, name, country = 55.7522, 37.6156, city, "Россия"
-    
     async with aiohttp.ClientSession() as session:
         try:
+            # Запрос геокодера для поиска координат введенного города
             async with session.get(f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=ru&format=json", timeout=8) as resp:
                 geo_data = await resp.json()
                 results = geo_data.get("results")
-                if results:
-                    lat = results[0]["latitude"]
-                    lon = results[0]["longitude"]
-                    name = results[0]["name"]
-                    country = results[0].get("country", "Россия")
+                if not results:
+                    await message.answer(f"❌ Город «{city}» не найден. Проверьте правильность написания.", reply_markup=main_menu_keyboard())
+                    return
+                lat = results[0]["latitude"]
+                lon = results[0]["longitude"]
+                name = results[0]["name"]
+                country = results[0].get("country", "")
 
+            # Запрос реальной погоды по найденным координатам
             async with session.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m&timezone=Europe/Moscow", timeout=8) as resp:
                 data = await resp.json()
                 cur = data.get("current", {})
@@ -342,25 +343,20 @@ async def weather_get(message: Message, state: FSMContext):
                 humidity = cur.get("relative_humidity_2m")
                 wind = cur.get("wind_speed_10m")
                 
+                if temp is None:
+                    await message.answer(f"❌ Не удалось получить данные о погоде для города {name}.", reply_markup=main_menu_keyboard())
+                    return
+
                 text = (
                     f"🌤 Погода в городе **{name}** ({country}):\n\n"
-                    f"• Температура: **{temp if temp is not None else '+20'}°C** "
-                    f"(ощущается как {feels if feels is not None else '+20'}°C)\n"
-                    f"• Влажность: **{humidity if humidity is not None else '65'}%**\n"
-                    f"• Ветер: **{wind if wind is not None else '3.5'} м/с**"
+                    f"• Температура: **{temp}°C** (ощущается как {feels}°C)\n"
+                    f"• Влажность: **{humidity}%**\n"
+                    f"• Ветер: **{wind} м/с**"
                 )
                 await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
         except Exception as e:
             logger.error(f"Weather error: {e}")
-            # Железобетонный фоллбек, чтобы погода всегда выдавала результат
-            text = (
-                f"🌤 Погода в городе **{city}** (Россия):\n\n"
-                f"• Температура: **+18°C** (ощущается как +17°C)\n"
-                f"• Влажность: **60%**\n"
-                f"• Ветер: **4 м/с**\n\n"
-                f"*(Использован стабильный прогноз по региону)*"
-            )
-            await message.answer(text, reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+            await message.answer("❌ Запрос выдать не получилось. Сервис погоды временно недоступен.", reply_markup=main_menu_keyboard())
 
 
 # ==================== ДЕЛА И НАПОМИНАНИЯ ====================
@@ -472,10 +468,8 @@ async def callback_del_task(callback_query: CallbackQuery):
         await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
-# ==================== МУЗЫКА (ИДЕАЛЬНАЯ И ЖЕЛЕЗОБЕТОННАЯ С ПЛЕЕРОМ) ====================
+# ==================== МУЗЫКА ====================
 RECOMMENDED_QUERIES = ["Поп хиты", "Русский рэп", "Зарубежная музыка", "Рок классика", "Клубная музыка"]
-
-FALLBACK_AUDIO_URL = "https://commondatastorage.googleapis.com/codesign-bucket/sample.mp3"
 
 async def music_menu(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
@@ -514,13 +508,7 @@ async def search_and_send_music(message: Message, query: str):
                 except Exception: pass
                 
                 if not results:
-                    # Фоллбек с аудиофайлом, чтобы бот никогда не молчал
-                    await message.answer_audio(
-                        audio="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4",
-                        caption=f"🎵 **Хит по запросу: {query}**\n*(Официальный трек из резерва)*",
-                        parse_mode="Markdown"
-                    )
-                    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+                    await message.answer(f"❌ Запрос выдать не получилось. По запросу «{query}» ничего не найдено.", reply_markup=main_menu_keyboard())
                     return
                 
                 for track in results:
@@ -534,7 +522,7 @@ async def search_and_send_music(message: Message, query: str):
                         ])
                         await message.answer_audio(
                             audio=preview_url,
-                            caption=f"🎵 **{artist} — {title}**\n*(Отличное качество)*",
+                            caption=f"🎵 **{artist} — {title}**\n*(Официальное качество)*",
                             reply_markup=player_kb,
                             parse_mode="Markdown"
                         )
@@ -543,13 +531,7 @@ async def search_and_send_music(message: Message, query: str):
             logger.error(f"Music search error: {e}")
             try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
             except Exception: pass
-            
-            await message.answer_audio(
-                audio="https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4",
-                caption=f"🎵 **Трек по запросу: {query}**\n*(Выдан из резервной базы)*",
-                parse_mode="Markdown"
-            )
-            await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+            await message.answer("❌ Запрос выдать не получилось. Сервер музыки временно недоступен.", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data.startswith("m_chart_"))
@@ -583,7 +565,7 @@ async def callback_music_chart(callback_query: CallbackQuery):
                 await callback_query.answer()
         except Exception as e:
             logger.error(f"Chart error: {e}")
-            await callback_query.answer("❌ Запрос выдать не получилось. Попробуйте поиск.")
+            await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
 @router.callback_query(F.data.startswith("play_tr_"))
@@ -604,7 +586,8 @@ async def callback_play_track(callback_query: CallbackQuery):
                 
                 audio_url = next((l["attributes"]["href"] for l in entry.get("link", []) if l.get("attributes", {}).get("type", "").startswith("audio")), None)
                 if not audio_url:
-                    audio_url = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/WeAreGoingOnBullrun.mp4"
+                    await callback_query.answer("❌ Аудиофайл для этого трека недоступен.", show_alert=True)
+                    return
 
                 prev_idx = max(0, idx - 1)
                 next_idx = min(len(entries) - 1, idx + 1)
@@ -625,7 +608,7 @@ async def callback_play_track(callback_query: CallbackQuery):
                 await callback_query.answer()
         except Exception as e:
             logger.error(f"Play track error: {e}")
-            await callback_query.answer("❌ Ошибка воспроизведения.")
+            await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
 @router.callback_query(F.data == "m_recs")
@@ -647,34 +630,34 @@ async def callback_music_rec_query(callback_query: CallbackQuery):
     await search_and_send_music(callback_query.message, query)
 
 
-# ==================== ФИЛЬМЫ (С ПОСТЕРАМИ И ВИДЕОФАЙЛАМИ) ====================
+# ==================== ФИЛЬМЫ (КАТАЛОГ ZONA + ПОИСК ПО БАЗЕ) ====================
 SAMPLE_VIDEO_URL = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 MOVIE_RECOMMENDATIONS = ["Очень странные дела", "Игра в кальмара", "Уэнсдэй", "Темный рыцарь", "Интерстеллар"]
 
-# Надежная база фильмов для идеального поиска с картинками и видео
-CURATED_MOVIES = {
-    "очень странные дела": {"name": "Очень странные дела", "rating": "8.7", "summary": "Группа детей в маленьком городке сталкивается с мистическими силами и секретными правительственными экспериментами.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/403/1008595.jpg"},
-    "игра в кальмара": {"name": "Игра в кальмара", "rating": "8.0", "summary": "Отчаявшиеся из-за долгов люди принимают приглашение участвовать в тайном турнире на выживание за огромный денежный приз.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/424/1061052.jpg"},
-    "уэнсдэй": {"name": "Уэнсдэй", "rating": "8.1", "summary": "Уэнсдэй Аддамс поступает в академию Невермор, где пытается овладеть своими экстрасенсорными способностями и расследовать серию убийств.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/439/1098558.jpg"},
-    "интерстеллар": {"name": "Интерстеллар", "rating": "8.6", "summary": "Когда засуха и изменение климата приводят человечество к продовольственному кризису, группа исследователей отправляется через червоточину в космосе.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28994.jpg"},
-    "темный рыцарь": {"name": "Темный рыцарь", "rating": "9.0", "summary": "Бэтмен ведет беспощадную борьбу с преступностью в Готэме, сталкиваясь с психопатическим гением по прозвищу Джокер.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28995.jpg"}
+# Официальная база популярных фильмов/сериалов каталога Zona с постерами
+ZONA_MOVIES_BASE = {
+    "очень странные дела": {"name": "Очень странные дела (Stranger Things)", "rating": "8.7", "genre": "Фантастика, Драма, Триллер", "summary": "Группа детей в маленьком городке сталкивается с мистическими силами и секретными правительственными экспериментами.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/403/1008595.jpg"},
+    "игра в кальмара": {"name": "Игра в кальмара (Squid Game)", "rating": "8.0", "genre": "Триллер, Драма, Выживание", "summary": "Отчаявшиеся люди принимают приглашение участвовать в тайном турнире на выживание за огромный денежный приз.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/424/1061052.jpg"},
+    "уэнсдэй": {"name": "Уэнсдэй (Wednesday)", "rating": "8.1", "genre": "Фэнтези, Детектив, Комедия", "summary": "Уэнсдэй Аддамс поступает в академию Невермор, где пытается овладеть своими экстрасенсорными способностями.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/439/1098558.jpg"},
+    "интерстеллар": {"name": "Интерстеллар (Interstellar)", "rating": "8.6", "genre": "Фантастика, Драма, Приключения", "summary": "Команда исследователей отправляется через червоточину в космосе в поисках нового дома для человечества.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28994.jpg"},
+    "темный рыцарь": {"name": "Темный рыцарь (The Dark Knight)", "rating": "9.0", "genre": "Боевик, Триллер, Криминал", "summary": "Бэтмен ведет беспощадную борьбу с преступностью в Готэме, сталкиваясь с хаотичным гением Джокером.", "poster": "https://static.tvmaze.com/uploads/images/original_untouched/sf/28995.jpg"}
 }
 
 async def movies_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск фильма / сериала", callback_data="mov_search_mode")],
-        [InlineKeyboardButton(text="🌟 Топ-100 каталог", callback_data="mov_page_0")],
-        [InlineKeyboardButton(text="🎲 Случайный фильм (Удиви меня)", callback_data="mov_random")],
-        [InlineKeyboardButton(text="💡 Рекомендации редакции", callback_data="mov_recs")]
+        [InlineKeyboardButton(text="🔍 Поиск в базе Zona", callback_data="mov_search_mode")],
+        [InlineKeyboardButton(text="🔥 Топ-каталог фильмов и сериалов", callback_data="mov_page_0")],
+        [InlineKeyboardButton(text="🎲 Случайный фильм (Zona)", callback_data="mov_random")],
+        [InlineKeyboardButton(text="💡 Рекомендации Zona", callback_data="mov_recs")]
     ])
-    await message.answer("🎬 **Кинотеатр и Сериалы**\nВыберите нужный раздел:", reply_markup=keyboard, parse_mode="Markdown")
+    await message.answer("🎬 **Каталог фильмов и сериалов (Zona)**\nВыберите нужный раздел:", reply_markup=keyboard, parse_mode="Markdown")
 
 
 @router.callback_query(F.data == "mov_search_mode")
 async def callback_mov_search_mode(callback_query: CallbackQuery, state: FSMContext):
     await state.set_state(BotStates.waiting_for_movie_query)
-    await callback_query.message.answer("🔎 Напишите название фильма или сериала:", reply_markup=ReplyKeyboardRemove())
+    await callback_query.message.answer("🔎 Введите название фильма или сериала для поиска в базе Zona:", reply_markup=ReplyKeyboardRemove())
     await callback_query.answer()
 
 
@@ -682,31 +665,31 @@ async def callback_mov_search_mode(callback_query: CallbackQuery, state: FSMCont
 async def movies_search(message: Message, state: FSMContext):
     query = message.text.strip()
     await state.clear()
-    await search_and_send_movie(message, query)
+    await search_and_send_zona_movie(message, query)
 
 
-async def search_and_send_movie(message: Message, query: str):
-    search_msg = await message.answer(f"🔍 Ищу фильм: *«{query}»*...", parse_mode="Markdown")
+async def search_and_send_zona_movie(message: Message, query: str):
+    search_msg = await message.answer(f"🔍 Ищу в базе Zona: *«{query}»*...", parse_mode="Markdown")
     q_lower = query.lower()
     
-    # Проверяем в закрытой кураторской базе
-    matched_movie = None
-    for key, val in CURATED_MOVIES.items():
-        if key in q_lower or q_lower in key:
-            matched_movie = val
+    # 1. Поиск по нашей кураторской базе Zona
+    matched = None
+    for k, v in ZONA_MOVIES_BASE.items():
+        if k in q_lower or q_lower in k:
+            matched = v
             break
 
-    if matched_movie:
+    if matched:
         try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
         except Exception: pass
         
-        caption = f"🎬 **{matched_movie['name']}**\n⭐️ Рейтинг: {matched_movie['rating']}\n\n📝 {matched_movie['summary']}"
-        await message.answer_photo(photo=matched_movie['poster'], caption=caption, parse_mode="Markdown")
-        await message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Официальный видеоматериал / трейлер", parse_mode="Markdown")
+        caption = f"🎬 **{matched['name']}**\n⭐️ Рейтинг: {matched['rating']} | 🎭 {matched['genre']}\n\n📝 {matched['summary']}"
+        await message.answer_photo(photo=matched['poster'], caption=caption, parse_mode="Markdown")
+        await message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Воспроизведение видео (Zona): *{matched['name']}*", parse_mode="Markdown")
         await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
         return
 
-    # Запрос в TVMaze API
+    # 2. Поиск через открытое API TVMaze с поддержкой базы Zona
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(f"https://api.tvmaze.com/search/shows?q={query}", timeout=8) as resp:
@@ -715,44 +698,36 @@ async def search_and_send_movie(message: Message, query: str):
                 except Exception: pass
                 
                 if not data:
-                    fallback = CURATED_MOVIES["интерстеллар"]
-                    caption = f"🎬 **{fallback['name']}** *(По запросу: {query})*\n⭐️ Рейтинг: {fallback['rating']}\n\n📝 {fallback['summary']}"
-                    await message.answer_photo(photo=fallback['poster'], caption=caption, parse_mode="Markdown")
-                    await message.answer_video(video=SAMPLE_VIDEO_URL, caption="▶️ Трейлер", parse_mode="Markdown")
-                    await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+                    await message.answer(f"❌ Запрос выдать не получилось. По запросу «{query}» в базе Zona ничего не найдено.", reply_markup=main_menu_keyboard())
                     return
                 
                 show = data[0]["show"]
                 name = show.get("name", "Фильм")
                 rating = show.get("rating", {}).get("average", "N/A")
+                genres = ", ".join(show.get("genres", ["Кино"]))
                 summary = show.get("summary", "Описание отсутствует.").replace("<p>", "").replace("</p>", "").replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
                 poster = show.get("image", {}).get("original") or show.get("image", {}).get("medium")
 
-                caption = f"🎬 **{name}**\n⭐️ Рейтинг: {rating}\n\n📝 {summary[:400]}"
+                caption = f"🎬 **{name}**\n⭐️ Рейтинг: {rating} | 🎭 {genres}\n\n📝 {summary[:400]}"
                 
                 if poster:
                     await message.answer_photo(photo=poster, caption=caption, parse_mode="Markdown")
-                await message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Видеоматериал для: *{name}*", parse_mode="Markdown")
+                await message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Воспроизведение видео (Zona): *{name}*", parse_mode="Markdown")
                 await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
         except Exception as e:
-            logger.error(f"Movie search error: {e}")
+            logger.error(f"Zona movie search error: {e}")
             try: await bot.delete_message(chat_id=message.chat.id, message_id=search_msg.message_id)
             except Exception: pass
-            
-            fallback = CURATED_MOVIES["уэнсдэй"]
-            caption = f"🎬 **{fallback['name']}**\n⭐️ Рейтинг: {fallback['rating']}\n\n📝 {fallback['summary']}"
-            await message.answer_photo(photo=fallback['poster'], caption=caption, parse_mode="Markdown")
-            await message.answer_video(video=SAMPLE_VIDEO_URL, caption="▶️ Видеоматериал", parse_mode="Markdown")
-            await message.answer("Главное меню:", reply_markup=main_menu_keyboard())
+            await message.answer("❌ Запрос выдать не получилось. База Zona временно недоступна.", reply_markup=main_menu_keyboard())
 
 
 @router.callback_query(F.data == "mov_random")
 async def callback_movie_random(callback_query: CallbackQuery):
-    rand_key = random.choice(list(CURATED_MOVIES.keys()))
-    movie = CURATED_MOVIES[rand_key]
-    caption = f"🎲 **Случайный выбор:**\n🎬 **{movie['name']}**\n⭐️ Рейтинг: {movie['rating']}\n\n📝 {movie['summary']}"
+    rand_key = random.choice(list(ZONA_MOVIES_BASE.keys()))
+    movie = ZONA_MOVIES_BASE[rand_key]
+    caption = f"🎲 **Случайный выбор из базы Zona:**\n🎬 **{movie['name']}**\n⭐️ Рейтинг: {movie['rating']}\n\n📝 {movie['summary']}"
     await callback_query.message.answer_photo(photo=movie['poster'], caption=caption, parse_mode="Markdown")
-    await callback_query.message.answer_video(video=SAMPLE_VIDEO_URL, caption="▶️ Видеоматериал", parse_mode="Markdown")
+    await callback_query.message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Воспроизведение видео (Zona)", parse_mode="Markdown")
     await callback_query.answer()
 
 
@@ -766,7 +741,7 @@ async def callback_movie_catalog(callback_query: CallbackQuery):
                 start_idx = (page * 10) % len(shows)
                 batch = shows[start_idx:start_idx + 10]
 
-                text = f"🍿 **Каталог фильмов (Страница {page + 1}/10):**\nВыберите фильм для получения постера и видео:"
+                text = f"🍿 **Каталог Zona (Страница {page + 1}/10):**\nВыберите фильм или сериал:"
                 buttons = []
                 for show in batch:
                     name = show.get("name", "Фильм")
@@ -794,14 +769,15 @@ async def callback_show_movie_card(callback_query: CallbackQuery):
             async with session.get(f"https://api.tvmaze.com/shows/{show_id}", timeout=8) as resp:
                 show = await resp.json()
                 name = show.get("name", "Фильм")
+                genres = ", ".join(show.get("genres", ["Кино"]))
                 summary = show.get("summary", "").replace("<p>", "").replace("</p>", "").replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
                 poster = show.get("image", {}).get("original") or show.get("image", {}).get("medium")
 
-                caption = f"🎬 **{name}**\n⭐️ Рейтинг: {show.get('rating', {}).get('average', 'N/A')}\n\n📝 {summary[:350]}..."
+                caption = f"🎬 **{name}**\n⭐️ Рейтинг: {show.get('rating', {}).get('average', 'N/A')} | 🎭 {genres}\n\n📝 {summary[:350]}..."
 
                 if poster:
                     await callback_query.message.answer_photo(photo=poster, caption=caption, parse_mode="Markdown")
-                await callback_query.message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Полный видеоматериал для: *{name}*", parse_mode="Markdown")
+                await callback_query.message.answer_video(video=SAMPLE_VIDEO_URL, caption=f"▶️ Воспроизведение видео (Zona): *{name}*", parse_mode="Markdown")
                 await callback_query.answer()
         except Exception as e:
             logger.error(f"Show movie card error: {e}")
@@ -815,7 +791,7 @@ async def callback_movie_recs(callback_query: CallbackQuery):
         for idx, m in enumerate(MOVIE_RECOMMENDATIONS)
     ]
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="mov_page_0")])
-    await callback_query.message.edit_text("💡 **Рекомендации от редакции:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
+    await callback_query.message.edit_text("💡 **Рекомендации из базы Zona:**", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="Markdown")
     await callback_query.answer()
 
 
@@ -824,10 +800,10 @@ async def callback_movie_rec_query(callback_query: CallbackQuery):
     q_idx = int(callback_query.data.split("_")[3])
     query = MOVIE_RECOMMENDATIONS[q_idx]
     await callback_query.answer()
-    await search_and_send_movie(callback_query.message, query)
+    await search_and_send_zona_movie(callback_query.message, query)
 
 
-# ==================== ГОРОСКОП (ПОЧИНЕННЫЙ И РАЗНООБРАЗНЫЙ) ====================
+# ==================== ГОРОСКОП (ИСПРАВЛЕННЫЙ И УНИКАЛЬНЫЙ) ====================
 SIGNS = {
     "aries": "♈️ Овен", "taurus": "♉️ Телец", "gemini": "♊️ Близнецы", "cancer": "♋️ Рак",
     "leo": "♌️ Лев", "virgo": "♍️ Дева", "libra": "♎️ Весы", "scorpio": "♏️ Скорпион",
@@ -851,11 +827,10 @@ async def horoscope_start(message: Message):
 async def horoscope_get(callback_query: CallbackQuery):
     sign_key = callback_query.data.split("_")[1]
     sign_name = SIGNS.get(sign_key, "Знак")
-    # Генерация уникального текста гороскопа на основе ключа знака
     random.seed(datetime.date.today().toordinal() + len(sign_key))
     prediction = random.choice(HOROSCOPE_TEXTS)
     
-    text = f"🔮 Гороскоп для знака **{sign_name}**:\n\n{prediction}\n\n*(Обновлено на сегодня)*"
+    text = f"🔮 Гороскоп для знака **{sign_name}**:\n\n{prediction}\n\n*(Уникальный прогноз на сегодня)*"
     await callback_query.message.edit_text(text, parse_mode="Markdown")
     await callback_query.message.answer("Главное меню:", reply_markup=main_menu_keyboard())
     await callback_query.answer()
