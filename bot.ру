@@ -4,7 +4,7 @@ import logging
 import os
 import random
 import sys
-import urllib.parse
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -125,8 +125,8 @@ async def check_access(user_id: int) -> bool:
 
 
 # ==================== СОСТОЯНИЯ (FSM) ====================
-class BotStates(StatesGroup):
-    waiting_for_weather_city = State()
+class FormStates(StatesGroup):
+    waiting_for_city = State()
     waiting_for_task_title = State()
     waiting_for_task_time = State()
     waiting_for_custom_task_time = State()
@@ -140,7 +140,7 @@ class BotStates(StatesGroup):
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🌤 Погода"), KeyboardButton(text="📝 Дела")],
+            [KeyboardButton(text="☀️ Погода"), KeyboardButton(text="📝 Дела")],
             [KeyboardButton(text="🎵 Музыка"), KeyboardButton(text="🎬 Фильмы")],
             [KeyboardButton(text="🔮 Гороскоп"), KeyboardButton(text="📅 Расписание")],
             [KeyboardButton(text="🤖 Нейросеть"), KeyboardButton(text="📸 Решить по фото")],
@@ -149,18 +149,21 @@ def main_menu_keyboard():
         resize_keyboard=True
     )
 
+def get_main_keyboard():
+    return main_menu_keyboard()
+
 
 # ==================== ГЛОБАЛЬНЫЙ ПЕРЕХВАТЧИК МЕНЮ ====================
 @router.message(StateFilter("*"), F.text.in_([
-    "🌤 Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы", 
+    "☀️ Погода", "📝 Дела", "🎵 Музыка", "🎬 Фильмы", 
     "🔮 Гороскоп", "📅 Расписание", "🤖 Нейросеть", 
     "📸 Решить по фото", "💎 Подписка", "❌ Отмена"
 ]))
 async def global_menu_interceptor(message: Message, state: FSMContext):
     await state.clear()
     text = message.text
-    if text == "🌤 Погода":
-        return await weather_start(message, state)
+    if text == "☀️ Погода":
+        return await weather_click(message, state)
     elif text == "📝 Дела":
         return await tasks_menu(message)
     elif text == "🎵 Музыка":
@@ -223,7 +226,7 @@ async def cmd_help(message: Message, state: FSMContext):
     await state.clear()
     help_text = (
         "ℹ️ **Справка по боту:**\n\n"
-        "• **🌤 Погода** — актуальный прогноз погоды по городам.\n"
+        "• **☀️ Погода** — актуальный прогноз погоды по городам.\n"
         "• **📝 Дела** — менеджер задач и уведомлений.\n"
         "• **🎵 Музыка** — вдохновение и ссылка на музыкальный канал.\n"
         "• **🎬 Фильмы** — развитие фантазии и ссылка на кино-канал.\n"
@@ -315,7 +318,6 @@ async def check_access_middleware(message: Message) -> bool:
 
 
 # ==================== ПОГОДА В ГРАДУСАХ ЦЕЛЬСИЯ ====================
-
 async def fetch_weather(city_name: str) -> str:
     encoded_city = quote(city_name.strip())
     url = f"https://wttr.in/{encoded_city}?m&format=4&lang=ru"
@@ -339,10 +341,10 @@ async def fetch_weather(city_name: str) -> str:
         logger.error(f"Weather error: {e}")
         return f"❌ Не удалось получить погоду для города «{city_name}»."
 
-# --- Хендлеры погоды ---
 
 @router.message(F.text == "☀️ Погода")
 async def weather_click(message: Message, state: FSMContext):
+    if not await check_access_middleware(message): return
     await state.clear()
     await state.set_state(FormStates.waiting_for_city)
     await message.answer("🌍 Введите название города (например, *Москва* или *Санкт-Петербург*):", parse_mode="Markdown")
@@ -389,15 +391,15 @@ async def tasks_menu(message: Message):
 
 @router.callback_query(F.data == "add_task")
 async def callback_add_task(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_task_title)
+    await state.set_state(FormStates.waiting_for_task_title)
     await callback_query.message.answer("✍️ Введите название задачи:", reply_markup=ReplyKeyboardRemove())
     await callback_query.answer()
 
 
-@router.message(BotStates.waiting_for_task_title)
+@router.message(FormStates.waiting_for_task_title)
 async def task_get_title(message: Message, state: FSMContext):
     await state.update_data(title=message.text.strip())
-    await state.set_state(BotStates.waiting_for_task_time)
+    await state.set_state(FormStates.waiting_for_task_time)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⚡️ Через 1 час", callback_data="time_1h"), InlineKeyboardButton(text="🌙 Сегодня в 20:00", callback_data="time_today")],
         [InlineKeyboardButton(text="☀️ Завтра в 09:00", callback_data="time_tom9"), InlineKeyboardButton(text="🚫 Без напоминания", callback_data="time_none")],
@@ -406,9 +408,9 @@ async def task_get_title(message: Message, state: FSMContext):
     await message.answer("🕒 Выберите время напоминания или укажите своё:", reply_markup=keyboard)
 
 
-@router.callback_query(F.data == "time_custom", BotStates.waiting_for_task_time)
+@router.callback_query(F.data == "time_custom", FormStates.waiting_for_task_time)
 async def task_custom_time_prompt(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_custom_task_time)
+    await state.set_state(FormStates.waiting_for_custom_task_time)
     await callback_query.message.answer(
         "⌨️ Введите дату и время в формате:\n`ДД.ММ.ГГГГ ЧЧ:ММ` (например, `28.10.2026 15:30`)\nили просто время для сегодняшнего дня:\n`ЧЧ:ММ` (например, `18:45`)",
         parse_mode="Markdown",
@@ -417,7 +419,7 @@ async def task_custom_time_prompt(callback_query: CallbackQuery, state: FSMConte
     await callback_query.answer()
 
 
-@router.message(BotStates.waiting_for_custom_task_time)
+@router.message(FormStates.waiting_for_custom_task_time)
 async def task_save_custom_time(message: Message, state: FSMContext):
     text_input = message.text.strip()
     data = await state.get_data()
@@ -457,7 +459,7 @@ async def task_save_custom_time(message: Message, state: FSMContext):
         await message.answer("❌ Запрос выдать не получилось. Попробуйте позже.", reply_markup=main_menu_keyboard())
 
 
-@router.callback_query(F.data.startswith("time_"), BotStates.waiting_for_task_time)
+@router.callback_query(F.data.startswith("time_"), FormStates.waiting_for_task_time)
 async def task_preset_time(callback_query: CallbackQuery, state: FSMContext):
     choice = callback_query.data.split("_")[1]
     now = datetime.datetime.now(MOSCOW_TZ)
@@ -594,17 +596,17 @@ async def schedule_menu(message: Message):
 
 @router.callback_query(F.data == "sched_add")
 async def sched_add(callback_query: CallbackQuery, state: FSMContext):
-    await state.set_state(BotStates.waiting_for_schedule_day)
+    await state.set_state(FormStates.waiting_for_schedule_day)
     await callback_query.message.answer("Введите день недели:", reply_markup=ReplyKeyboardRemove())
     await callback_query.answer()
 
-@router.message(BotStates.waiting_for_schedule_day)
+@router.message(FormStates.waiting_for_schedule_day)
 async def sched_day(message: Message, state: FSMContext):
     await state.update_data(day=message.text.strip().capitalize())
-    await state.set_state(BotStates.waiting_for_schedule_content)
+    await state.set_state(FormStates.waiting_for_schedule_content)
     await message.answer("Введите текст расписания:")
 
-@router.message(BotStates.waiting_for_schedule_content)
+@router.message(FormStates.waiting_for_schedule_content)
 async def sched_save(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
@@ -641,10 +643,10 @@ async def ai_start(message: Message, state: FSMContext):
     if not AI_API_KEY or not openai_client:
         await message.answer("⚠️ Нейросеть недоступна (не настроен AI_API_KEY).", reply_markup=main_menu_keyboard())
         return
-    await state.set_state(BotStates.waiting_for_ai_prompt)
+    await state.set_state(FormStates.waiting_for_ai_prompt)
     await message.answer("🤖 Задайте вопрос нейросети:", reply_markup=ReplyKeyboardRemove())
 
-@router.message(BotStates.waiting_for_ai_prompt)
+@router.message(FormStates.waiting_for_ai_prompt)
 async def ai_process(message: Message, state: FSMContext):
     prompt = message.text.strip()
     await state.clear()
@@ -662,11 +664,11 @@ async def photo_solver_start(message: Message, state: FSMContext):
     if not AI_API_KEY or not openai_client:
         await message.answer("⚠️ Функция недоступна (не настроен AI_API_KEY для нейросети).", reply_markup=main_menu_keyboard())
         return
-    await state.set_state(BotStates.waiting_for_task_photo)
+    await state.set_state(FormStates.waiting_for_task_photo)
     await message.answer("📸 Отправьте фотографию с условием задачи, и я дам подробное решение:", reply_markup=ReplyKeyboardRemove())
 
 
-@router.message(BotStates.waiting_for_task_photo, F.photo)
+@router.message(FormStates.waiting_for_task_photo, F.photo)
 async def photo_solver_process(message: Message, state: FSMContext):
     await state.clear()
     processing_msg = await message.answer("🔍 Анализирую фотографию и решаю задачу...")
@@ -700,7 +702,7 @@ async def photo_solver_process(message: Message, state: FSMContext):
         await message.answer("❌ Запрос выдать не получилось. Убедитесь, что текст виден четко, или попробуйте позже.", reply_markup=main_menu_keyboard())
 
 
-@router.message(BotStates.waiting_for_task_photo)
+@router.message(FormStates.waiting_for_task_photo)
 async def photo_solver_fallback(message: Message):
     await message.answer("⚠️ Пожалуйста, отправьте именно **изображение (фотографию)** с задачей.")
 
