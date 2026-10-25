@@ -314,7 +314,7 @@ async def check_access_middleware(message: Message) -> bool:
     return False
 
 
-# ==================== ПОГОДА (ИСПРАВЛЕНА) ====================
+# ==================== ПОГОДА ====================
 async def weather_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     await state.set_state(BotStates.waiting_for_weather_city)
@@ -506,7 +506,7 @@ async def callback_done_task(callback_query: CallbackQuery):
     task_id = int(callback_query.data.split("_")[2])
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            async with db.execute("UPDATE tasks SET is_done = 1 WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+            await db.execute("UPDATE tasks SET is_done = 1 WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
             await db.commit()
         await callback_query.answer("Задача выполнена!")
         await callback_query.message.edit_text("✅ Задача отмечена выполненной.")
@@ -520,7 +520,7 @@ async def callback_del_task(callback_query: CallbackQuery):
     task_id = int(callback_query.data.split("_")[2])
     try:
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            async with db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
+            await db.execute("DELETE FROM tasks WHERE id = ? AND user_id = ?", (task_id, callback_query.from_user.id))
             await db.commit()
         try: scheduler.remove_job(f"task_{task_id}")
         except Exception: pass
@@ -531,7 +531,7 @@ async def callback_del_task(callback_query: CallbackQuery):
         await callback_query.answer("❌ Запрос выдать не получилось.")
 
 
-# ==================== МУЗЫКА (Вдохновение + Ссылка на ТГ канал) ====================
+# ==================== МУЗЫКА (Вдохновение + Кнопка Слушать) ====================
 async def music_menu(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     text = (
@@ -540,12 +540,12 @@ async def music_menu(message: Message, state: FSMContext):
         "и наполняет каждый день яркими эмоциями."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎧 Слушать в нашем ТГ-канале", url=TG_CHANNEL_MUSIC_URL)]
+        [InlineKeyboardButton(text="🎧 Слушать", url=TG_CHANNEL_MUSIC_URL)]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# ==================== ФИЛЬМЫ (Фантазия + Ссылка на ТГ канал) ====================
+# ==================== ФИЛЬМЫ (Фантазия + Кнопка Смотреть) ====================
 async def movies_start(message: Message, state: FSMContext):
     if not await check_access_middleware(message): return
     text = (
@@ -554,7 +554,7 @@ async def movies_start(message: Message, state: FSMContext):
         "и смотреть на привычные вещи под совершенно новым углом."
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍿 Смотреть в нашем ТГ-канале", url=TG_CHANNEL_MOVIES_URL)]
+        [InlineKeyboardButton(text="🍿 Смотреть", url=TG_CHANNEL_MOVIES_URL)]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
