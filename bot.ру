@@ -40,11 +40,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =========================================================================
-# НАСТРОЙКА КАНАЛОВ И ССЫЛОк
+# НАСТРОЙКА КАНАЛОВ И ССЫЛОК
 # =========================================================================
 TG_CHANNEL_MUSIC_URL = "https://t.me/your_music_channel_link"   # Ссылка на музыкальный канал
-# Имя вашего бота для инлайн-поиска фильмов (без знака @)
-MOVIE_BOT_USERNAME = "KykarekalkaFilmsBot" # Замените на юзернейм вашего или рабочего кино-бота для тестов
 
 # Токен бота
 BOT_TOKEN = "8963614977:AAHiQQhnkaQpyfXi2wGk_tI6F3D8toBlcxY"
@@ -536,7 +534,7 @@ async def music_menu(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# ==================== ФИЛЬМЫ (ИНЛАЙН-ПОИСК С ПРОВЕРКОЙ ПОДПИСКИ) ====================
+# ==================== ФИЛЬМЫ (ИНЛАЙН-ПОИСК И БАЗА) ====================
 async def movies_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     if not await check_access(user_id):
@@ -547,27 +545,82 @@ async def movies_start(message: Message, state: FSMContext):
         "🎬 **Кинотеатр и поиск фильмов:**\n\n"
         "Нажмите на кнопку ниже, чтобы открыть поиск по всей базе фильмов и сериалов прямо в чате:"
     )
-    # Кнопка сразу вызывает инлайн-поиск с именем бота
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Найти фильм или сериал", switch_inline_query_current_chat="")]
     ])
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# Обработчик инлайн-запросов (поиск фильмов через бота)
+# База данных фильмов для инлайн-поиска (вы можете дополнять её)
+SAMPLE_MOVIES = [
+    {
+        "id": "1", 
+        "title": "Слово пацана. Кровь на асфальте", 
+        "desc": "сериал | kp:8 | imdb:7.6 | 2023 | Россия", 
+        "text": "🎬 **Слово пацана. Кровь на асфальте**\n\nсериал | kp:8 | imdb:7.6 | 2023\nРоссия | драма, криминал\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
+    },
+    {
+        "id": "2", 
+        "title": "Менталист (The Mentalist)", 
+        "desc": "сериал | kp:8.1 | imdb:8.2 | 2008 | США", 
+        "text": "🎬 **Менталист (The Mentalist)**\n\nсериал | kp:8.1 | imdb:8.2 | 2008\nСША | триллер, детектив, драма\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
+    },
+    {
+        "id": "3", 
+        "title": "Папины дочки. Новые", 
+        "desc": "сериал | kp:8.2 | 2023 | Россия", 
+        "text": "🎬 **Папины дочки. Новые**\n\nсериал | kp:8.2 | 2023\nРоссия | комедия\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
+    },
+    {
+        "id": "4", 
+        "title": "Дневники вампира", 
+        "desc": "сериал | kp:8.4 | imdb:7.7 | 2009", 
+        "text": "🎬 **Дневники вампира**\n\nсериал | kp:8.4 | imdb:7.7 | 2009\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
+    },
+    {
+        "id": "5", 
+        "title": "Человек-паук: Новый день", 
+        "desc": "фильм | 2026 | 360p", 
+        "text": "🎬 **Человек-паук: Новый день**\n\nфильм | 360p\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
+    }
+]
+
 @router.inline_query()
 async def inline_movies_handler(inline_query):
-    query = inline_query.query.strip()
-    results = [
-        InlineQueryResultArticle(
-            id="1",
-            title="Поиск фильмов и сериалов",
-            description="Нажмите, чтобы ввести название фильма или сериала",
-            input_message_content=InputTextMessageContent(
-                message_text="🎬 Введите название фильма в поиске или выберите из каталога."
+    query = inline_query.query.strip().lower()
+    
+    # Фильтруем фильмы по тому, что ввел пользователь
+    matched_movies = [
+        m for m in SAMPLE_MOVIES 
+        if not query or query in m["title"].lower()
+    ]
+    
+    results = []
+    for m in matched_movies:
+        results.append(
+            InlineQueryResultArticle(
+                id=m["id"],
+                title=m["title"],
+                description=m["desc"],
+                input_message_content=InputTextMessageContent(
+                    message_text=m["text"],
+                    parse_mode="Markdown"
+                )
             )
         )
-    ]
+        
+    if not results:
+        results.append(
+            InlineQueryResultArticle(
+                id="not_found",
+                title="❌ Ничего не найдено",
+                description="Попробуйте изменить поисковый запрос",
+                input_message_content=InputTextMessageContent(
+                    message_text="❌ Фильм или сериал не найден в базе данных."
+                )
+            )
+        )
+        
     await inline_query.answer(results, cache_time=1)
 
 
@@ -739,7 +792,7 @@ async def start_web_server():
     logger.info(f"Web server started on port {port}")
 
 async def background_self_ping():
-    await asyncio.sleep(20)
+    async asyncio.sleep(20)
     async with aiohttp.ClientSession() as session:
         while True:
             render_url = os.getenv("RENDER_EXTERNAL_URL")
