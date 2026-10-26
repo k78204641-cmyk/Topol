@@ -44,9 +44,10 @@ logger = logging.getLogger(__name__)
 # =========================================================================
 TG_CHANNEL_MUSIC_URL = "https://t.me/your_music_channel_link"   # Ссылка на музыкальный канал
 
-# Токен бота
+# Токен бота и внешнего API фильмов (poiskkino.dev)
 BOT_TOKEN = "8963614977:AAHiQQhnkaQpyfXi2wGk_tI6F3D8toBlcxY"
 AI_API_KEY = os.getenv("AI_API_KEY", "")
+MOVIE_API_KEY = os.getenv("MOVIE_API_KEY", "")  # Ключ от @poiskkinodev_bot
 PAYMENT_PROVIDER_TOKEN = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bot.db")
 
@@ -534,7 +535,7 @@ async def music_menu(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# ==================== ФИЛЬМЫ (ИНЛАЙН-ПОИСК И БАЗА) ====================
+# ==================== ФИЛЬМЫ (ВНЕШНЯЯ БАЗА POISKKINO.DEV) ====================
 async def movies_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     if not await check_access(user_id):
@@ -542,8 +543,8 @@ async def movies_start(message: Message, state: FSMContext):
         return
 
     text = (
-        "🎬 **Кинотеатр и поиск фильмов:**\n\n"
-        "Нажмите на кнопку ниже, чтобы открыть поиск по всей базе фильмов и сериалов прямо в чате:"
+        "🎬 **Кинотеатр и поиск фильмов (ПоискКино):**\n\n"
+        "Нажмите на кнопку ниже, чтобы открыть поиск по базе фильмов и сериалов прямо в чате:"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Найти фильм или сериал", switch_inline_query_current_chat="")]
@@ -551,74 +552,72 @@ async def movies_start(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-SAMPLE_MOVIES = [
-    {
-        "id": "1", 
-        "title": "Слово пацана. Кровь на асфальте", 
-        "desc": "сериал | kp:8 | imdb:7.6 | 2023 | Россия", 
-        "text": "🎬 **Слово пацана. Кровь на асфальте**\n\nсериал | kp:8 | imdb:7.6 | 2023\nРоссия | драма, криминал\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
-    },
-    {
-        "id": "2", 
-        "title": "Менталист (The Mentalist)", 
-        "desc": "сериал | kp:8.1 | imdb:8.2 | 2008 | США", 
-        "text": "🎬 **Менталист (The Mentalist)**\n\nсериал | kp:8.1 | imdb:8.2 | 2008\nСША | триллер, детектив, драма\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
-    },
-    {
-        "id": "3", 
-        "title": "Папины дочки. Новые", 
-        "desc": "сериал | kp:8.2 | 2023 | Россия", 
-        "text": "🎬 **Папины дочки. Новые**\n\nсериал | kp:8.2 | 2023\nРоссия | комедия\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
-    },
-    {
-        "id": "4", 
-        "title": "Дневники вампира", 
-        "desc": "сериал | kp:8.4 | imdb:7.7 | 2009", 
-        "text": "🎬 **Дневники вампира**\n\nсериал | kp:8.4 | imdb:7.7 | 2009\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
-    },
-    {
-        "id": "5", 
-        "title": "Человек-паук: Новый день", 
-        "desc": "фильм | 2026 | 360p", 
-        "text": "🎬 **Человек-паук: Новый день**\n\nфильм | 360p\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*"
-    }
-]
-
 @router.inline_query()
 async def inline_movies_handler(inline_query):
-    query = inline_query.query.strip().lower()
-    
-    matched_movies = [
-        m for m in SAMPLE_MOVIES 
-        if not query or query in m["title"].lower()
-    ]
-    
+    query = inline_query.query.strip()
     results = []
-    for m in matched_movies:
+
+    if not MOVIE_API_KEY:
         results.append(
             InlineQueryResultArticle(
-                id=m["id"],
-                title=m["title"],
-                description=m["desc"],
+                id="no_token",
+                title="⚠️ Внешняя база не настроена",
+                description="Добавьте MOVIE_API_KEY в переменные окружения на Render",
                 input_message_content=InputTextMessageContent(
-                    message_text=m["text"],
-                    parse_mode="Markdown"
+                    message_text="⚠️ Токен от @poiskkinodev_bot (`MOVIE_API_KEY`) не настроен в панели Render."
                 )
             )
         )
-        
+        await inline_query.answer(results, cache_time=1)
+        return
+
+    if query:
+        # Официальный эндпоинт для поиска по названию от poiskkino.dev
+        url = f"https://api.poiskkino.dev/v1/movie/search?query={quote(query)}"
+        headers = {
+            "accept": "application/json",
+            "X-API-KEY": MOVIE_API_KEY
+        }
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(url, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        # Обрабатываем список результатов (в зависимости от структуры ответа)
+                        items = data.get("docs") or data.get("results") or data
+                        if isinstance(items, list):
+                            for item in items:
+                                title = item.get("title") or item.get("name") or item.get("russian") or "Без названия"
+                                year = item.get("year") or "Н/Д"
+                                kp_rating = item.get("rating", {}).get("kp") if isinstance(item.get("rating"), dict) else item.get("kp_rating") or "Н/Д"
+                                description = item.get("description") or item.get("shortDescription") or "Описание отсутствует."
+                                
+                                results.append(
+                                    InlineQueryResultArticle(
+                                        id=str(item.get("id") or item.get("kp_id") or random.randint(1, 100000)),
+                                        title=title,
+                                        description=f"Кинопоиск: {kp_rating} | Год: {year}",
+                                        input_message_content=InputTextMessageContent(
+                                            message_text=f"🎬 **{title}**\n\nГод: {year}\nРейтинг Кинопоиск: {kp_rating}\n\n{description[:350]}...\n\n*(Здесь будет отправлено видео или ссылка на просмотр)*",
+                                            parse_mode="Markdown"
+                                        )
+                                    )
+                                )
+        except Exception as e:
+            logger.error(f"Poiskkino API error: {e}")
+
     if not results:
         results.append(
             InlineQueryResultArticle(
-                id="not_found",
-                title="❌ Ничего не найдено",
-                description="Попробуйте изменить поисковый запрос",
+                id="prompt",
+                title="🔍 Введите название фильма или сериала...",
+                description="Поиск по базе ПоискКино",
                 input_message_content=InputTextMessageContent(
-                    message_text="❌ Фильм или сериал не найден в базе данных."
+                    message_text="🎬 Введите название интересующего фильма или сериала в строке поиска."
                 )
             )
         )
-        
+
     await inline_query.answer(results, cache_time=1)
 
 
@@ -790,7 +789,7 @@ async def start_web_server():
     logger.info(f"Web server started on port {port}")
 
 async def background_self_ping():
-    await asyncio.sleep(20)  # Исправлена ошибка: убрано дублирование слова async
+    await asyncio.sleep(20)
     async with aiohttp.ClientSession() as session:
         while True:
             render_url = os.getenv("RENDER_EXTERNAL_URL")
