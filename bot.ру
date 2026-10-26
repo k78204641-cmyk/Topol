@@ -551,7 +551,6 @@ async def movies_start(message: Message, state: FSMContext):
     await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-# База данных фильмов для инлайн-поиска (вы можете дополнять её)
 SAMPLE_MOVIES = [
     {
         "id": "1", 
@@ -589,7 +588,6 @@ SAMPLE_MOVIES = [
 async def inline_movies_handler(inline_query):
     query = inline_query.query.strip().lower()
     
-    # Фильтруем фильмы по тому, что ввел пользователь
     matched_movies = [
         m for m in SAMPLE_MOVIES 
         if not query or query in m["title"].lower()
@@ -792,7 +790,7 @@ async def start_web_server():
     logger.info(f"Web server started on port {port}")
 
 async def background_self_ping():
-    async asyncio.sleep(20)
+    await asyncio.sleep(20)  # Исправлена ошибка: убрано дублирование слова async
     async with aiohttp.ClientSession() as session:
         while True:
             render_url = os.getenv("RENDER_EXTERNAL_URL")
